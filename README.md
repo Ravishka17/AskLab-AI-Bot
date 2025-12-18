@@ -50,7 +50,23 @@ pip install -r requirements.txt
 
 python -m asklab_ai_bot
 # or: python main.py
+# or: python app.py
 ```
+
+### Pterodactyl / panel hosting
+
+If your host expects an “app file” (a single Python file to run), this repo includes entrypoints at the project root.
+
+Recommended settings:
+
+- **App py file:** `main.py`
+  - Alternatives: `app.py` or `asklab_ai_bot/__main__.py`
+- **Requirements file:** `requirements.txt`
+
+If you see `can't open file '/home/container/main.py'`, it means the panel can’t find the file at that exact path.
+
+- Open your server’s file manager and confirm you see `main.py` directly inside `/home/container/`.
+- If your files are inside a folder (for example `/home/container/AskLab-AI-Bot/`), set **App py file** to include that folder name (e.g. `AskLab-AI-Bot/main.py`).
 
 ## Usage
 
