@@ -55,18 +55,25 @@ python -m asklab_ai_bot
 
 ### Pterodactyl / panel hosting
 
-If your host expects an “app file” (a single Python file to run), this repo includes entrypoints at the project root.
+If your host expects an "app file" (a single Python file to run), this repo includes entrypoints at the project root.
 
 Recommended settings:
 
 - **App py file:** `main.py`
   - Alternatives: `app.py` or `asklab_ai_bot/__main__.py`
 - **Requirements file:** `requirements.txt`
+- **Additional Python packages:** `asklab_ai_bot`
+  - This tells the hosting panel to install the local `asklab_ai_bot` package so it can be imported by the entrypoint files
 
-If you see `can't open file '/home/container/main.py'`, it means the panel can’t find the file at that exact path.
+If you see `can't open file '/home/container/main.py'`, it means the panel can't find the file at that exact path.
 
-- Open your server’s file manager and confirm you see `main.py` directly inside `/home/container/`.
+- Open your server's file manager and confirm you see `main.py` directly inside `/home/container/`.
 - If your files are inside a folder (for example `/home/container/AskLab-AI-Bot/`), set **App py file** to include that folder name (e.g. `AskLab-AI-Bot/main.py`).
+
+If you see `ModuleNotFoundError: No module named 'asklab_ai_bot'`:
+
+- In the **Startup** tab, add `asklab_ai_bot` to the **Additional Python packages** field
+- This ensures the local package is installed in editable mode so Python can find it
 
 ## Usage
 
