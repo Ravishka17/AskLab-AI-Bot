@@ -33,7 +33,6 @@ conversation_history = {}
 
 # --- TOOLS ---
 TOOLS = [
-    # Moderation
     {
         "type": "function",
         "function": {
@@ -50,7 +49,6 @@ TOOLS = [
             }
         }
     },
-    # Research: Search
     {
         "type": "function",
         "function": {
@@ -59,16 +57,12 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "The search term"
-                    }
+                    "query": {"type": "string", "description": "The search term"}
                 },
                 "required": ["query"]
             }
         }
     },
-    # Research: Read
     {
         "type": "function",
         "function": {
@@ -77,10 +71,7 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "title": {
-                        "type": "string",
-                        "description": "The exact Wikipedia page title"
-                    }
+                    "title": {"type": "string", "description": "The exact Wikipedia page title"}
                 },
                 "required": ["title"]
             }
@@ -88,7 +79,6 @@ TOOLS = [
     }
 ]
 
-# --- HELPER FUNCTIONS ---
 async def execute_wiki_search(query):
     try:
         results = wikipedia.search(query)
@@ -109,7 +99,6 @@ async def execute_wiki_page(title):
         return f"Error reading page: {str(e)}"
 
 def extract_thinking(text):
-    """Extract content from <think> tags"""
     if not text:
         return None
     pattern = r'<think>(.*?)</think>'
@@ -119,7 +108,6 @@ def extract_thinking(text):
     return None
 
 def remove_thinking_tags(text):
-    """Remove <think> tags and their content from text"""
     if not text:
         return ""
     return re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
@@ -189,31 +177,44 @@ async def process_question(ctx, question: str):
     system_message = {
         "role": "system",
         "content": (
-            "You are AskLab AI - a reasoning assistant with Wikipedia access.\n\n"
-            "⚠️ CRITICAL: You have NO information after 2023. You MUST research using Wikipedia for ANY current information.\n\n"
-            "📋 MANDATORY RESEARCH PROCESS:\n\n"
-            "When asked about a current president/PM/leader:\n"
-            "1. Use search_wikipedia to find the position page\n"
-            "2. Use get_wikipedia_page to read that position page\n"
-            "3. Write <think>I found [name] is the current holder. Now I need to learn more about them.</think>\n"
-            "4. Use get_wikipedia_page to read the person's biographical page\n"
-            "5. Write <think>I now have comprehensive information about [name] including [key facts]. This answers the question completely.</think>\n"
-            "6. Provide detailed final answer\n\n"
-            "⚠️ YOU MUST:\n"
-            "- Call tools to actually research (don't just describe researching)\n"
-            "- Write <think>...</think> AFTER each tool result explaining what you learned and what to do next\n"
-            "- ALWAYS read at least 2 pages: the position page AND the person's page\n"
-            "- Never answer without researching first\n"
-            "- Put ALL reasoning inside <think> tags\n"
+            "You are AskLab AI - a reasoning assistant with Wikipedia research capabilities.\n\n"
+            "🎯 YOUR THINKING PROCESS:\n"
+            "You must ALWAYS think BEFORE taking action. Your workflow is:\n\n"
+            "1. <think>Plan what you need to find and what to search</think> → Then call search/read tool\n"
+            "2. [Tool executes and returns results]\n"
+            "3. <think>Analyze what you found and plan next step</think> → Then call next tool OR give final answer\n"
+            "4. Repeat until you have complete information\n\n"
+            "⚠️ CRITICAL RULES:\n"
+            "- You have NO knowledge after 2023. MUST research current information.\n"
+            "- ALWAYS write <think>...</think> BEFORE calling any tool\n"
+            "- In <think> blocks, explain: what you need, why, and what you'll do\n"
+            "- After getting tool results, write another <think> about what you learned\n"
+            "- Continue researching until you have comprehensive information\n"
+            "- For current president/PM questions: research the position page AND the person's biographical page\n"
             "- Your final answer should NOT contain <think> tags\n\n"
-            "EXAMPLE FOR 'Who is the current president of Sri Lanka?':\n"
-            "Step 1: Call search_wikipedia('President of Sri Lanka')\n"
-            "Step 2: Call get_wikipedia_page('President of Sri Lanka')\n"
-            "Step 3: <think>I found that Anura Kumara Dissanayake is the current president. I need to read his page to provide complete information about him.</think>\n"
-            "Step 4: Call get_wikipedia_page('Anura Kumara Dissanayake')\n"
-            "Step 5: <think>Perfect! I now have all the details: he took office September 23, 2024, won the election on September 21, leads the JVP/NPP alliance, and his victory was historic due to requiring second-preference counting. I have everything needed for a comprehensive answer.</think>\n"
-            "Step 6: Provide final answer with all details\n\n"
-            "Remember: <think> blocks should ONLY appear BETWEEN tool uses, not before the first tool or in the final answer!"
+            "📝 EXAMPLE FOR 'Who is the current president of Sri Lanka?':\n\n"
+            "Response 1:\n"
+            "<think>The user is asking about the current president of Sri Lanka. Since I don't have information after 2023, I need to search Wikipedia. I'll start by searching for 'President of Sri Lanka' to find who currently holds this position.</think>\n"
+            "[Then the system will call search_wikipedia]\n\n"
+            "After search results come back:\n"
+            "Response 2:\n"
+            "<think>Good, I found the 'President of Sri Lanka' page. Let me read this article to find out who the current president is.</think>\n"
+            "[Then the system will call get_wikipedia_page('President of Sri Lanka')]\n\n"
+            "After reading the position page:\n"
+            "Response 3:\n"
+            "<think>Alright, I found out that the current president is Anura Kumara Dissanayake. He took office in September 2024. Now I need to search for more detailed information about him by reading his biographical page on Wikipedia.</think>\n"
+            "[Then the system will call get_wikipedia_page('Anura Kumara Dissanayake')]\n\n"
+            "After reading his biographical page:\n"
+            "Response 4:\n"
+            "<think>Perfect! I now have comprehensive information. He won the 2024 election on September 21, took office September 23, leads the JVP and NPP alliance, and his victory was historic for requiring second-preference vote counting. I have all the information needed to provide a complete answer.</think>\n\n"
+            "The current President of Sri Lanka is **Anura Kumara Dissanayake**.\n\n"
+            "He assumed office on September 23, 2024...\n"
+            "[Full detailed answer]\n\n"
+            "🔑 KEY POINTS:\n"
+            "- Think → Act → Think → Act → Think → Final Answer\n"
+            "- NEVER skip thinking steps\n"
+            "- Research thoroughly (multiple pages for complete info)\n"
+            "- Only give final answer when you have all information needed"
         )
     }
 
@@ -221,23 +222,17 @@ async def process_question(ctx, question: str):
         async with ctx.typing():
             messages = [system_message] + conversation_history[channel_id]
             sources_used = []
-            max_iterations = 15
+            max_iterations = 20
             iteration = 0
-            tools_used_count = 0
             
             while iteration < max_iterations:
                 iteration += 1
-                
-                # Force tool use on first iteration for current questions
-                tool_choice = "auto"
-                if iteration == 1 and any(word in question.lower() for word in ['current', 'who is', 'now', 'today', 'latest', 'recent', 'president', 'prime minister', 'pm']):
-                    tool_choice = "required"
                 
                 response = groq_client.chat.completions.create(
                     model=GROQ_MODEL,
                     messages=messages,
                     tools=TOOLS[1:],
-                    tool_choice=tool_choice,
+                    tool_choice="auto",
                     temperature=GROQ_TEMPERATURE,
                     max_tokens=2000
                 )
@@ -245,37 +240,24 @@ async def process_question(ctx, question: str):
                 response_msg = response.choices[0].message
                 tool_calls = response_msg.tool_calls
                 
-                # If no tool calls
+                # ALWAYS check for and display thinking first
+                if response_msg.content:
+                    thinking = extract_thinking(response_msg.content)
+                    if thinking:
+                        thinking_msg = f"🧠 **Thinking...**\n\n> {thinking}"
+                        await ctx.send(thinking_msg)
+                
+                # If no tool calls, this is the final answer
                 if not tool_calls:
-                    # Check if we've researched enough (at least 2 tool uses)
-                    if tools_used_count >= 2:
-                        # Extract thinking if present
-                        if response_msg.content:
-                            thinking = extract_thinking(response_msg.content)
-                            if thinking:
-                                thinking_msg = f"🧠 **Thinking...**\n\n> {thinking}"
-                                await ctx.send(thinking_msg)
-                        
-                        # Get final answer
-                        assistant_message = remove_thinking_tags(response_msg.content) if response_msg.content else ""
-                        if assistant_message.strip():
-                            break
+                    assistant_message = remove_thinking_tags(response_msg.content) if response_msg.content else ""
+                    if assistant_message.strip():
+                        break
                     else:
-                        # Haven't researched enough - force more research
-                        messages.append({
-                            "role": "assistant",
-                            "content": response_msg.content or ""
-                        })
-                        messages.append({
-                            "role": "user",
-                            "content": f"You've only used {tools_used_count} tool(s). You MUST read at least 2 Wikipedia pages: the position page AND the person's biographical page. Continue researching."
-                        })
+                        # Empty response, continue
+                        messages.append({"role": "assistant", "content": response_msg.content or ""})
                         continue
                 
-                # Tools were called
-                tools_used_count += len(tool_calls)
-                
-                # Add assistant message with tool calls
+                # Add assistant's response with tool calls
                 messages.append({
                     "role": "assistant",
                     "content": response_msg.content or "",
@@ -291,7 +273,7 @@ async def process_question(ctx, question: str):
                     ]
                 })
                 
-                # Execute tools
+                # Execute tools and display actions
                 for tool_call in tool_calls:
                     fname = tool_call.function.name
                     fargs = json.loads(tool_call.function.arguments)
@@ -312,40 +294,28 @@ async def process_question(ctx, question: str):
                         if wiki_url not in sources_used:
                             sources_used.append(wiki_url)
                     
+                    # Add tool result to messages
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
                         "name": fname,
                         "content": str(tool_result)
                     })
-                
-                # After tool execution, prompt for thinking
-                if tools_used_count < 3:  # Still in research phase
-                    messages.append({
-                        "role": "user",
-                        "content": "Now write <think>...</think> explaining what you found and what you'll research next."
-                    })
             
+            # If max iterations reached
             if iteration >= max_iterations:
-                assistant_message = "I've reached the research limit. Let me provide what I found so far."
-                # Try one more time to get a summary
-                messages.append({"role": "user", "content": "Provide your final answer based on the research so far."})
-                final_response = groq_client.chat.completions.create(
-                    model=GROQ_MODEL,
-                    messages=messages,
-                    temperature=GROQ_TEMPERATURE,
-                    max_tokens=2000
-                )
-                assistant_message = remove_thinking_tags(final_response.choices[0].message.content or assistant_message)
+                assistant_message = "I've conducted extensive research but need to conclude. Based on what I found:\n\n[Provide summary]"
 
             assistant_message = assistant_message.strip()
             conversation_history[channel_id].append({"role": "assistant", "content": assistant_message})
             
-            # Add sources
+            # Add sources with markdown links
             if sources_used and assistant_message:
-                sources_text = "\n\n📚 **Sources**\n"
+                sources_text = "\n\n📚 **Sources**\n\n"
                 for idx, source in enumerate(sources_used, 1):
-                    sources_text += f"{idx}. {source}\n"
+                    # Extract page title from URL for display
+                    page_title = source.split('/wiki/')[-1].replace('_', ' ')
+                    sources_text += f"{idx}. [wikipedia.org]({source})\n"
                 assistant_message += sources_text
             
             # Send final answer
