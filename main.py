@@ -365,8 +365,9 @@ async def process_question(ctx, question: str):
             "- After getting tool results, write another <think> about what you learned\n"
             "- Continue researching until you have comprehensive information\n"
             "- For current president/PM questions: research the position page AND the person's biographical page\n"
+            "- search_wikipedia returns JSON: {\"results\": [\"Title 1\", ...]}\n"
             "- Your final answer should NOT contain <think> tags\n\n"
-            "📝 EXAMPLE FOR 'Who is the current president of Sri Lanka?':\n\n"
+
             "Response 1:\n"
             "<think>The user is asking about the current president of Sri Lanka. Since I don't have information after 2023, I need to search Wikipedia. I'll start by searching for 'President of Sri Lanka' to find who currently holds this position.</think>\n"
             "[Then the system will call search_wikipedia]\n\n"
@@ -420,29 +421,38 @@ async def process_question(ctx, question: str):
 
                 completion_tools = TOOLS[1:]
                 completion_messages = messages
-                tool_choice = "auto"
 
                 if required_tool:
                     completion_tools = [
                         t for t in TOOLS[1:]
                         if t.get("function", {}).get("name") == required_tool
                     ]
-                    tool_choice = "required"
 
                     guidance = None
                     if required_tool == "search_wikipedia":
-                        guidance = f"Next: call search_wikipedia with query: {desired_query}."
+                        guidance = (
+                            "Your next message must call the search_wikipedia tool. "
+                            f"Search for: {desired_query}. "
+                            "Include your reasoning ONLY inside <think>...</think>."
+                        )
                     elif required_tool == "get_wikipedia_page":
                         if tool_counts["get_wikipedia_page"] == 0:
                             guidance = (
-                                f"Next: call get_wikipedia_page for the best match to '{desired_query}' "
-                                "from the last search results."
+                                "Your next message must call the get_wikipedia_page tool using one of the titles from the last search results. "
+                                "Include your reasoning ONLY inside <think>...</think>."
                             )
                         elif needs_position_and_bio:
                             if incumbent_title:
-                                guidance = f"Next: call get_wikipedia_page for the incumbent's biography page: {incumbent_title}."
+                                guidance = (
+                                    "Your next message must call the get_wikipedia_page tool for the incumbent's biography page. "
+                                    f"Use this title: {incumbent_title}. "
+                                    "Include your reasoning ONLY inside <think>...</think>."
+                                )
                             else:
-                                guidance = "Next: call get_wikipedia_page for the incumbent's biography page identified from the position page you read."
+                                guidance = (
+                                    "Your next message must call the get_wikipedia_page tool for the incumbent's biography page (the person's name you identified from the position page). "
+                                    "Include your reasoning ONLY inside <think>...</think>."
+                                )
 
                     if guidance:
                         completion_messages = messages + [{"role": "system", "content": guidance}]
@@ -451,7 +461,7 @@ async def process_question(ctx, question: str):
                     model=GROQ_MODEL,
                     messages=completion_messages,
                     tools=completion_tools,
-                    tool_choice=tool_choice,
+                    tool_choice="auto",
                     temperature=GROQ_TEMPERATURE,
                     max_tokens=2000
                 )
