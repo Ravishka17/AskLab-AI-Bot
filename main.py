@@ -188,28 +188,6 @@ def extract_tagged_tool_calls(text: str) -> List[SimpleNamespace]:
     return calls
 
 
-def synthesize_thinking(question: str, tool_call: SimpleNamespace) -> Optional[str]:
-    try:
-        args = json.loads(tool_call.function.arguments)
-    except Exception:
-        args = {}
-
-    if tool_call.function.name == 'search_wikipedia':
-        query = args.get('query')
-        if query:
-            return (
-                "The user is asking a current-events question. Since I don't have information after 2023, "
-                f"I need to search Wikipedia. I'll start by searching for '{query}'."
-            )
-
-    if tool_call.function.name == 'get_wikipedia_page':
-        title = args.get('title')
-        if title:
-            return f"I'll read the Wikipedia article '{title}' to extract the up-to-date information I need."
-
-    return None
-
-
 def detect_tool_intent(text: str) -> bool:
     if not text:
         return False
@@ -367,12 +345,7 @@ async def moderate_message(message):
 async def process_question(ctx, question: str):
     channel_id = ctx.channel.id
     
-    if channel_id not in conversation_history:
-        conversation_history[channel_id] = []
-    
-    conversation_history[channel_id].append({"role": "user", "content": question})
-    if len(conversation_history[channel_id]) > 10:
-        conversation_history[channel_id] = conversation_history[channel_id][-10:]
+    conversation_history[channel_id] = [{"role": "user", "content": question}]
 
     system_message = {
         "role": "system",
@@ -439,11 +412,46 @@ async def process_question(ctx, question: str):
             while iteration < max_iterations:
                 iteration += 1
 
+                required_tool = None
+                if tool_counts["search_wikipedia"] < min_search:
+                    required_tool = "search_wikipedia"
+                elif tool_counts["get_wikipedia_page"] < min_pages:
+                    required_tool = "get_wikipedia_page"
+
+                completion_tools = TOOLS[1:]
+                completion_messages = messages
+                tool_choice = "auto"
+
+                if required_tool:
+                    completion_tools = [
+                        t for t in TOOLS[1:]
+                        if t.get("function", {}).get("name") == required_tool
+                    ]
+                    tool_choice = "required"
+
+                    guidance = None
+                    if required_tool == "search_wikipedia":
+                        guidance = f"Next: call search_wikipedia with query: {desired_query}."
+                    elif required_tool == "get_wikipedia_page":
+                        if tool_counts["get_wikipedia_page"] == 0:
+                            guidance = (
+                                f"Next: call get_wikipedia_page for the best match to '{desired_query}' "
+                                "from the last search results."
+                            )
+                        elif needs_position_and_bio:
+                            if incumbent_title:
+                                guidance = f"Next: call get_wikipedia_page for the incumbent's biography page: {incumbent_title}."
+                            else:
+                                guidance = "Next: call get_wikipedia_page for the incumbent's biography page identified from the position page you read."
+
+                    if guidance:
+                        completion_messages = messages + [{"role": "system", "content": guidance}]
+
                 response = groq_client.chat.completions.create(
                     model=GROQ_MODEL,
-                    messages=messages,
-                    tools=TOOLS[1:],
-                    tool_choice="auto",
+                    messages=completion_messages,
+                    tools=completion_tools,
+                    tool_choice=tool_choice,
                     temperature=GROQ_TEMPERATURE,
                     max_tokens=2000
                 )
@@ -459,34 +467,7 @@ async def process_question(ctx, question: str):
                         tool_calls = tagged_tool_calls
                         assistant_content = remove_tool_tags(raw_content)
 
-                unmet_requirements = (
-                    tool_counts["search_wikipedia"] < min_search
-                    or tool_counts["get_wikipedia_page"] < min_pages
-                )
-
-                forced_tool = False
-                if not tool_calls and unmet_requirements:
-                    forced_tool = True
-
-                    if tool_counts["search_wikipedia"] < min_search:
-                        tool_calls = [make_tool_call("search_wikipedia", {"query": desired_query})]
-                    else:
-                        if needs_position_and_bio and tool_counts["get_wikipedia_page"] == 1 and incumbent_title:
-                            title = incumbent_title
-                        else:
-                            title = choose_wikipedia_title(desired_query, last_search_results)
-
-                        tool_calls = [make_tool_call("get_wikipedia_page", {"title": title})]
-
-                    raw_content = ""
-                    assistant_content = ""
-
                 thinking = extract_thinking(raw_content)
-                if forced_tool and tool_calls:
-                    thinking = synthesize_thinking(question, tool_calls[0])
-                elif not thinking and tool_calls:
-                    thinking = synthesize_thinking(question, tool_calls[0])
-
                 if thinking:
                     thinking_key = re.sub(r'\s+', ' ', thinking).strip().lower()
                     if thinking_key and thinking_key != last_thinking_sent_key:
@@ -494,11 +475,11 @@ async def process_question(ctx, question: str):
                         last_thinking_sent_key = thinking_key
 
                 if not tool_calls:
-                    assistant_message = clean_llm_text(response_msg.content or "")
-                    if assistant_message.strip():
+                    assistant_message = clean_llm_text(raw_content)
+                    if assistant_message.strip() and not required_tool:
                         break
 
-                    messages.append({"role": "assistant", "content": assistant_content or response_msg.content or ""})
+                    messages.append({"role": "assistant", "content": assistant_content or raw_content or ""})
                     continue
                 
                 # Add assistant's response with tool calls
