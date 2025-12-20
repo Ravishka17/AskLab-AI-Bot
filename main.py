@@ -34,6 +34,7 @@ intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 conversation_history = {}
+last_subject_by_channel = {}
 
 # --- TOOLS ---
 TOOLS = [
@@ -236,6 +237,55 @@ def requires_position_and_bio(question: str) -> bool:
     return is_current_affairs_question(q) and any(role in q for role in ["president", "prime minister", "pm"])
 
 
+def is_followup_question(question: str) -> bool:
+    q = (question or "").strip().lower()
+    if not q:
+        return False
+
+    if re.search(r'\b(him|her|them|it|this|that|he|she|they)\b', q) and len(q) <= 80:
+        return True
+
+    if any(q.startswith(prefix) for prefix in [
+        "tell me more",
+        "more about",
+        "tell me about",
+        "who is he",
+        "who is she",
+        "who are they",
+        "what is it",
+        "what about"
+    ]):
+        return True
+
+    return False
+
+
+def resolve_followup_question(question: str, subject: str) -> str:
+    subject = (subject or "").strip()
+    if not subject:
+        return question
+
+    q = (question or "").strip()
+    ql = q.lower()
+
+    if re.search(r'\b(tell me more about|more about)\s+(him|her|them|it|this|that)\b', ql):
+        return f"Tell me more about {subject}."
+
+    if re.search(r'^tell me more\b', ql):
+        return f"Tell me more about {subject}."
+
+    if re.search(r'^tell me about\b', ql) and re.search(r'\b(him|her|them|it|this|that)\b', ql):
+        return f"Tell me about {subject}."
+
+    if re.search(r'^who is\s+(he|she|they)\b', ql):
+        return f"Who is {subject}?"
+
+    if re.search(r'^what about\s+(him|her|them|it|this|that)\b', ql):
+        return f"What about {subject}?"
+
+    return f"{q.rstrip('?.!')} (referring to: {subject})."
+
+
 def suggest_wikipedia_query(question: str) -> str:
     q = (question or "").strip()
     m = re.search(r'\b(president|prime minister)\s+of\s+([^\?\.\n]+)', q, flags=re.IGNORECASE)
@@ -344,7 +394,12 @@ async def moderate_message(message):
 
 async def process_question(ctx, question: str):
     channel_id = ctx.channel.id
-    
+
+    if is_followup_question(question):
+        last_subject = last_subject_by_channel.get(channel_id)
+        if last_subject:
+            question = resolve_followup_question(question, last_subject)
+
     conversation_history[channel_id] = [{"role": "user", "content": question}]
 
     system_message = {
@@ -410,6 +465,7 @@ async def process_question(ctx, question: str):
             tool_counts = {"search_wikipedia": 0, "get_wikipedia_page": 0}
             last_search_results: List[str] = []
             incumbent_title: Optional[str] = None
+            last_read_title: Optional[str] = None
             desired_query = suggest_wikipedia_query(question)
 
             progress_entries: List[str] = []
@@ -554,6 +610,7 @@ async def process_question(ctx, question: str):
 
                     elif fname == "get_wikipedia_page":
                         title = fargs.get('title', '')
+                        last_read_title = title
                         read_msg = f"📖 **Reading Article...**\n\n> \"{title}\""
                         await update_progress(read_msg)
                         tool_result = await execute_wiki_page(title)
@@ -587,33 +644,42 @@ async def process_question(ctx, question: str):
             if sources_used and assistant_message:
                 sources_text = "\n\n📚 **Sources**\n\n"
                 for idx, source in enumerate(sources_used, 1):
-                    # Extract page title from URL for display
-                    page_title = source.split('/wiki/')[-1].replace('_', ' ')
                     sources_text += f"{idx}. [wikipedia.org]({source})\n"
                 assistant_message += sources_text
-            
-            # Send final answer (edit the same message)
+
+            last_subject = (
+                (last_read_title or "").strip()
+                or (incumbent_title or "").strip()
+                or (last_search_results[0].strip() if last_search_results else "")
+                or desired_query
+            )
+            if last_subject:
+                last_subject_by_channel[channel_id] = last_subject
+
+            # Send final answer (keep editing the same progress message; if it overflows, send extra messages)
             if assistant_message:
-                final_entry = f"✅ **Answer**\n\n{assistant_message}".strip()
-                final_content = "\n\n".join(progress_entries + [final_entry]) if progress_entries else final_entry
+                final_text = assistant_message.strip()
+                progress_text = "\n\n".join(progress_entries).strip()
+                sep = "\n\n" if progress_text else ""
 
-                if len(final_content) > 2000:
-                    trimmed_progress = list(progress_entries)
-                    while trimmed_progress and len("\n\n".join(trimmed_progress + [final_entry])) > 2000:
-                        trimmed_progress.pop(0)
-
-                    if trimmed_progress:
-                        final_content = "\n\n".join(["…"] + trimmed_progress + [final_entry])
-                    else:
-                        final_content = final_entry
-
-                if len(final_content) > 2000:
-                    final_content = final_content[:1990].rstrip() + "\n\n…"
-
-                if progress_msg:
-                    await progress_msg.edit(content=final_content)
+                available = 2000 - len(progress_text) - len(sep)
+                if available <= 0:
+                    if progress_msg:
+                        await progress_msg.edit(content=progress_text[:2000])
+                    remainder = final_text
                 else:
-                    await ctx.send(final_content)
+                    first_chunk = final_text[:available]
+                    remainder = final_text[available:]
+                    combined = f"{progress_text}{sep}{first_chunk}".strip()
+                    if progress_msg:
+                        await progress_msg.edit(content=combined[:2000])
+                    else:
+                        await ctx.send(combined[:2000])
+
+                remainder = remainder.lstrip()
+                while remainder:
+                    await ctx.send(remainder[:1990])
+                    remainder = remainder[1990:]
             else:
                 if progress_msg:
                     await progress_msg.edit(content="I couldn't generate a response. Please try again.")
