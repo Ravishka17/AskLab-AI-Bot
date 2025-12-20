@@ -211,6 +211,72 @@ def synthesize_thinking(question: str, tool_call: SimpleNamespace) -> Optional[s
 
     return None
 
+
+def detect_tool_intent(text: str) -> bool:
+    if not text:
+        return False
+    patterns = [
+        r'\bsearch\b.*\bwikipedia\b',
+        r'\bsearch wikipedia\b',
+        r'\bsearching wikipedia\b',
+        r'\bread\b.*\bwikipedia\b',
+        r"\b(i\s*(?:'m| am| will|\s*'ll)\s+search)\b",
+        r"\b(i\s*(?:'m| am| will|\s*'ll)\s+look\s+up)\b",
+        r'\bsince i don\s*\x27?t have information after 2023\b'
+    ]
+    return any(re.search(p, text, flags=re.IGNORECASE | re.DOTALL) for p in patterns)
+
+
+def is_current_affairs_question(question: str) -> bool:
+    q = (question or "").lower()
+    if any(word in q for word in ["current", "today", "now", "latest", "as of"]):
+        return True
+
+    roles = [
+        "president",
+        "prime minister",
+        "pm",
+        "ceo",
+        "leader",
+        "monarch",
+        "king",
+        "queen",
+        "chancellor",
+        "governor",
+        "mayor"
+    ]
+
+    if ("who" in q or "who's" in q or "whos" in q) and any(role in q for role in roles):
+        return True
+
+    if any(role in q for role in ["president", "prime minister", "pm"]) and any(word in q for word in ["current", "incumbent"]):
+        return True
+
+    return False
+
+
+def requires_position_and_bio(question: str) -> bool:
+    q = (question or "").lower()
+    return is_current_affairs_question(q) and any(role in q for role in ["president", "prime minister", "pm"])
+
+
+def suggest_wikipedia_query(question: str) -> str:
+    q = (question or "").strip()
+    m = re.search(r'\b(president|prime minister)\s+of\s+([^\?\.\n]+)', q, flags=re.IGNORECASE)
+    if m:
+        role = m.group(1).title()
+        subject = m.group(2).strip()
+        return f"{role} of {subject}"
+
+    m = re.search(r"\b(?:tell me about|what is|who is|who's|whos)\s+(.+)", q, flags=re.IGNORECASE)
+    if m:
+        subject = m.group(1).strip().rstrip('?.!')
+        if subject:
+            return subject
+
+    return q.rstrip('?.!')
+
+
 @bot.event
 async def on_ready():
     print(f'{bot.user} has connected to Discord!')
@@ -327,6 +393,11 @@ async def process_question(ctx, question: str):
             last_thinking_sent_key = None
             assistant_message = ""
 
+            needs_position_and_bio = requires_position_and_bio(question)
+            needs_current_research = is_current_affairs_question(question)
+            tool_counts = {"search_wikipedia": 0, "get_wikipedia_page": 0}
+            forced_tool_attempts = 0
+
             while iteration < max_iterations:
                 iteration += 1
 
@@ -361,7 +432,50 @@ async def process_question(ctx, question: str):
                         last_thinking_sent_key = thinking_key
 
                 if not tool_calls:
-                    assistant_message = clean_llm_text(raw_content)
+                    assistant_message_candidate = clean_llm_text(raw_content)
+
+                    min_search = 0
+                    min_pages = 0
+                    if needs_position_and_bio:
+                        min_search = 1
+                        min_pages = 2
+                    elif needs_current_research:
+                        min_search = 1
+                        min_pages = 1
+                    elif detect_tool_intent(raw_content):
+                        min_search = 1
+
+                    unmet_requirements = (
+                        (min_search and tool_counts["search_wikipedia"] < min_search)
+                        or (min_pages and tool_counts["get_wikipedia_page"] < min_pages)
+                    )
+
+                    if unmet_requirements and forced_tool_attempts < 5:
+                        forced_tool_attempts += 1
+                        messages.append({"role": "assistant", "content": assistant_content or ""})
+
+                        if tool_counts["search_wikipedia"] < min_search:
+                            query = suggest_wikipedia_query(question)
+                            messages.append({
+                                "role": "system",
+                                "content": (
+                                    "Tool call required. Call search_wikipedia next. "
+                                    f"Use this query: {query}. "
+                                    "Respond with a tool call only; do not answer yet."
+                                )
+                            })
+                        else:
+                            messages.append({
+                                "role": "system",
+                                "content": (
+                                    "Tool call required. Continue research by calling get_wikipedia_page using the best matching title from the last search results. "
+                                    "Respond with a tool call only; do not answer yet."
+                                )
+                            })
+
+                        continue
+
+                    assistant_message = assistant_message_candidate
                     if assistant_message.strip():
                         break
 
@@ -407,7 +521,10 @@ async def process_question(ctx, question: str):
                         wiki_url = f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}"
                         if wiki_url not in sources_used:
                             sources_used.append(wiki_url)
-                    
+
+                    if fname in tool_counts:
+                        tool_counts[fname] += 1
+
                     # Add tool result to messages
                     messages.append({
                         "role": "tool",
