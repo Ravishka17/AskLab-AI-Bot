@@ -393,6 +393,8 @@ async def process_question(ctx, question: str):
         )
     }
 
+    progress_msg = None
+
     try:
         async with ctx.typing():
             messages = [system_message] + conversation_history[channel_id]
@@ -409,6 +411,27 @@ async def process_question(ctx, question: str):
             last_search_results: List[str] = []
             incumbent_title: Optional[str] = None
             desired_query = suggest_wikipedia_query(question)
+
+            progress_entries: List[str] = []
+            progress_msg = await ctx.send("🧠 **Working...**")
+
+            async def update_progress(entry: str) -> None:
+                nonlocal progress_entries, progress_msg
+                if not progress_msg:
+                    return
+
+                entry = (entry or "").strip()
+                if not entry:
+                    return
+
+                progress_entries.append(entry)
+                content = "\n\n".join(progress_entries)
+                if len(content) > 1950:
+                    while len(content) > 1950 and len(progress_entries) > 1:
+                        progress_entries.pop(0)
+                        content = "…\n\n" + "\n\n".join(progress_entries)
+
+                await progress_msg.edit(content=content[:2000])
 
             while iteration < max_iterations:
                 iteration += 1
@@ -481,7 +504,7 @@ async def process_question(ctx, question: str):
                 if thinking:
                     thinking_key = re.sub(r'\s+', ' ', thinking).strip().lower()
                     if thinking_key and thinking_key != last_thinking_sent_key:
-                        await ctx.send(f"🧠 **Thinking...**\n\n{format_blockquote(thinking)}")
+                        await update_progress(f"🧠 **Thinking...**\n\n{format_blockquote(thinking)}")
                         last_thinking_sent_key = thinking_key
 
                 if not tool_calls:
@@ -520,7 +543,7 @@ async def process_question(ctx, question: str):
                     if fname == "search_wikipedia":
                         query = fargs.get('query', '')
                         search_msg = f"🔍 **Searching Wikipedia...**\n\n> \"{query}\""
-                        await ctx.send(search_msg)
+                        await update_progress(search_msg)
                         tool_result = await execute_wiki_search(query)
 
                         try:
@@ -532,7 +555,7 @@ async def process_question(ctx, question: str):
                     elif fname == "get_wikipedia_page":
                         title = fargs.get('title', '')
                         read_msg = f"📖 **Reading Article...**\n\n> \"{title}\""
-                        await ctx.send(read_msg)
+                        await update_progress(read_msg)
                         tool_result = await execute_wiki_page(title)
 
                         if needs_position_and_bio and tool_counts.get("get_wikipedia_page", 0) == 0 and not incumbent_title:
@@ -569,22 +592,45 @@ async def process_question(ctx, question: str):
                     sources_text += f"{idx}. [wikipedia.org]({source})\n"
                 assistant_message += sources_text
             
-            # Send final answer
+            # Send final answer (edit the same message)
             if assistant_message:
-                if len(assistant_message) > 2000:
-                    chunks = [assistant_message[i:i+1990] for i in range(0, len(assistant_message), 1990)]
-                    for chunk in chunks:
-                        await ctx.send(chunk)
+                final_entry = f"✅ **Answer**\n\n{assistant_message}".strip()
+                final_content = "\n\n".join(progress_entries + [final_entry]) if progress_entries else final_entry
+
+                if len(final_content) > 2000:
+                    trimmed_progress = list(progress_entries)
+                    while trimmed_progress and len("\n\n".join(trimmed_progress + [final_entry])) > 2000:
+                        trimmed_progress.pop(0)
+
+                    if trimmed_progress:
+                        final_content = "\n\n".join(["…"] + trimmed_progress + [final_entry])
+                    else:
+                        final_content = final_entry
+
+                if len(final_content) > 2000:
+                    final_content = final_content[:1990].rstrip() + "\n\n…"
+
+                if progress_msg:
+                    await progress_msg.edit(content=final_content)
                 else:
-                    await ctx.send(assistant_message)
+                    await ctx.send(final_content)
             else:
-                await ctx.send("I couldn't generate a response. Please try again.")
+                if progress_msg:
+                    await progress_msg.edit(content="I couldn't generate a response. Please try again.")
+                else:
+                    await ctx.send("I couldn't generate a response. Please try again.")
 
     except Exception as e:
-        await ctx.send(f"❌ **Error:** {str(e)}")
-        print(f"Error: {e}")
-        import traceback
-        traceback.print_exc()
+        error_text = f"❌ **Error:** {str(e)}"
+        try:
+            if progress_msg:
+                await progress_msg.edit(content=error_text[:2000])
+            else:
+                await ctx.send(error_text)
+        finally:
+            print(f"Error: {e}")
+            import traceback
+            traceback.print_exc()
 
 if __name__ == "__main__":
     if not DISCORD_BOT_TOKEN:
