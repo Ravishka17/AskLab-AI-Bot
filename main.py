@@ -193,27 +193,31 @@ async def process_question(ctx, question: str):
             "⚠️ CRITICAL: You have NO information after 2023. You MUST research using Wikipedia for ANY current information.\n\n"
             "📋 MANDATORY RESEARCH PROCESS:\n\n"
             "When asked about a current president/PM/leader:\n"
-            "1. Use search_wikipedia to find the position page\n"
-            "2. Use get_wikipedia_page to read that position page\n"
-            "3. Write <think>I found [name] is the current holder. Now I need to learn more about them.</think>\n"
-            "4. Use get_wikipedia_page to read the person's biographical page\n"
-            "5. Write <think>I now have comprehensive information about [name] including [key facts]. This answers the question completely.</think>\n"
-            "6. Provide detailed final answer\n\n"
+            "1. FIRST: Write <think>I'm currently working on identifying [position]. My process has focused on obtaining the most recent information, given that it's [current date]. I'll start by searching '[search term]' on Wikipedia.</think>\n"
+            "2. Use search_wikipedia to find the position page\n"
+            "3. Use get_wikipedia_page to read that position page\n"
+            "4. Write <think>Alright, I found out that [name] is the current [position]. Now, I'll search their name '[name]' on Wikipedia to find more information about them.</think>\n"
+            "5. Use get_wikipedia_page to read the person's biographical page\n"
+            "6. Write <think>I've observed that the search results confirm [name] is still in power, with [recent event] noted. My initial research established that [key facts]. No further investigation is necessary. It appears this question is resolved.</think>\n"
+            "7. Provide detailed final answer\n\n"
             "⚠️ YOU MUST:\n"
+            "- ALWAYS start with a thinking block planning your research\n"
             "- Call tools to actually research (don't just describe researching)\n"
             "- Write <think>...</think> AFTER each tool result explaining what you learned and what to do next\n"
             "- ALWAYS read at least 2 pages: the position page AND the person's page\n"
             "- Never answer without researching first\n"
             "- Put ALL reasoning inside <think> tags\n"
-            "- Your final answer should NOT contain <think> tags\n\n"
+            "- Your final answer should NOT contain <think> tags\n"
+            "- Use the exact markdown format: 🧠 Thinking... for thinking blocks\n\n"
             "EXAMPLE FOR 'Who is the current president of Sri Lanka?':\n"
-            "Step 1: Call search_wikipedia('President of Sri Lanka')\n"
-            "Step 2: Call get_wikipedia_page('President of Sri Lanka')\n"
-            "Step 3: <think>I found that Anura Kumara Dissanayake is the current president. I need to read his page to provide complete information about him.</think>\n"
-            "Step 4: Call get_wikipedia_page('Anura Kumara Dissanayake')\n"
-            "Step 5: <think>Perfect! I now have all the details: he took office September 23, 2024, won the election on September 21, leads the JVP/NPP alliance, and his victory was historic due to requiring second-preference counting. I have everything needed for a comprehensive answer.</think>\n"
-            "Step 6: Provide final answer with all details\n\n"
-            "Remember: <think> blocks should ONLY appear BETWEEN tool uses, not before the first tool or in the final answer!"
+            "Step 1: <think>I'm currently working on identifying the President of Sri Lanka. My process has focused on obtaining the most recent information, given that it's December 20, 2025. I'll start by searching 'President of Sri Lanka' on Wikipedia.</think>\n"
+            "Step 2: Call search_wikipedia('President of Sri Lanka')\n"
+            "Step 3: Call get_wikipedia_page('President of Sri Lanka')\n"
+            "Step 4: <think>Alright, I found out that the current president of Sri Lanka is Anura Kumara Dissanayake. Now, I'll search his name 'Anura Kumara Dissanayake' on Wikipedia to find more information about him.</think>\n"
+            "Step 5: Call get_wikipedia_page('Anura Kumara Dissanayake')\n"
+            "Step 6: <think>I've observed that the search results confirm Anura Kumara Dissanayake is still in power, with a December 2025 parliamentary address noted. My initial research established that his presidency began in September 2024. No further investigation is necessary. It appears this question is resolved.</think>\n"
+            "Step 7: Provide final answer with all details\n\n"
+            "Remember: Thinking blocks MUST appear BEFORE the first tool call and BETWEEN tool uses!"
         )
     }
 
@@ -227,12 +231,38 @@ async def process_question(ctx, question: str):
             
             while iteration < max_iterations:
                 iteration += 1
-                
-                # Force tool use on first iteration for current questions
+
+                # Handle initial thinking step before any tool calls
+                if iteration == 1 and tools_used_count == 0:
+                    # First iteration - ask for initial thinking
+                    thinking_response = groq_client.chat.completions.create(
+                        model=GROQ_MODEL,
+                        messages=messages,
+                        temperature=GROQ_TEMPERATURE,
+                        max_tokens=1000
+                    )
+                    thinking_content = thinking_response.choices[0].message.content or ""
+
+                    # Extract and display initial thinking
+                    thinking = extract_thinking(thinking_content)
+                    if thinking:
+                        thinking_msg = f"🧠 **Thinking...**\n\n> {thinking}"
+                        await ctx.send(thinking_msg)
+
+                    # Add thinking to conversation history
+                    messages.append({
+                        "role": "assistant",
+                        "content": thinking_content
+                    })
+
+                    # Continue to tool calling phase
+                    continue
+
+                # Force tool use on second iteration for current questions
                 tool_choice = "auto"
-                if iteration == 1 and any(word in question.lower() for word in ['current', 'who is', 'now', 'today', 'latest', 'recent', 'president', 'prime minister', 'pm']):
+                if iteration == 2 and any(word in question.lower() for word in ['current', 'who is', 'now', 'today', 'latest', 'recent', 'president', 'prime minister', 'pm']):
                     tool_choice = "required"
-                
+
                 response = groq_client.chat.completions.create(
                     model=GROQ_MODEL,
                     messages=messages,
@@ -241,25 +271,25 @@ async def process_question(ctx, question: str):
                     temperature=GROQ_TEMPERATURE,
                     max_tokens=2000
                 )
-                
+
                 response_msg = response.choices[0].message
                 tool_calls = response_msg.tool_calls
                 
                 # If no tool calls
                 if not tool_calls:
-                    # Check if we've researched enough (at least 2 tool uses)
-                    if tools_used_count >= 2:
-                        # Extract thinking if present
-                        if response_msg.content:
-                            thinking = extract_thinking(response_msg.content)
-                            if thinking:
-                                thinking_msg = f"🧠 **Thinking...**\n\n> {thinking}"
-                                await ctx.send(thinking_msg)
-                        
-                        # Get final answer
-                        assistant_message = remove_thinking_tags(response_msg.content) if response_msg.content else ""
-                        if assistant_message.strip():
-                            break
+                   # Check if we've researched enough (at least 2 tool uses)
+                   if tools_used_count >= 2:
+                       # Extract thinking if present
+                       if response_msg.content:
+                           thinking = extract_thinking(response_msg.content)
+                           if thinking:
+                               thinking_msg = f"🧠 **Thinking...**\n\n> {thinking}"
+                               await ctx.send(thinking_msg)
+
+                       # Get final answer
+                       assistant_message = remove_thinking_tags(response_msg.content) if response_msg.content else ""
+                       if assistant_message.strip():
+                           break
                     else:
                         # Haven't researched enough - force more research
                         messages.append({
@@ -321,10 +351,10 @@ async def process_question(ctx, question: str):
                 
                 # After tool execution, prompt for thinking
                 if tools_used_count < 3:  # Still in research phase
-                    messages.append({
-                        "role": "user",
-                        "content": "Now write <think>...</think> explaining what you found and what you'll research next."
-                    })
+                   messages.append({
+                       "role": "user",
+                       "content": "Now write <think>...</think> explaining what you found and what you'll research next."
+                   })
             
             if iteration >= max_iterations:
                 assistant_message = "I've reached the research limit. Let me provide what I found so far."
