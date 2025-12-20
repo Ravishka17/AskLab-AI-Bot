@@ -86,11 +86,9 @@ TOOLS = [
 async def execute_wiki_search(query):
     try:
         results = wikipedia.search(query)
-        if not results:
-            return "No results found."
-        return f"Found Page Titles: {json.dumps(results[:5])}"
+        return json.dumps({"results": results[:5]})
     except Exception as e:
-        return f"Search error: {str(e)}"
+        return json.dumps({"results": [], "error": str(e)})
 
 async def execute_wiki_page(title):
     try:
@@ -277,6 +275,43 @@ def suggest_wikipedia_query(question: str) -> str:
     return q.rstrip('?.!')
 
 
+def choose_wikipedia_title(desired: str, results: List[str]) -> str:
+    desired_norm = (desired or "").strip().lower()
+    if desired_norm:
+        for r in results or []:
+            if (r or "").strip().lower() == desired_norm:
+                return r
+        for r in results or []:
+            r_norm = (r or "").strip().lower()
+            if desired_norm in r_norm or r_norm in desired_norm:
+                return r
+
+    return (results[0] if results else desired).strip()
+
+
+def extract_incumbent_title_from_position_page(text: str) -> Optional[str]:
+    if not text:
+        return None
+
+    patterns = [
+        r'\bThe incumbent is\s+([^\n\.;:,]{2,80})',
+        r'\bincumbent is\s+([^\n\.;:,]{2,80})',
+        r'\bIncumbent\s*[:\-]\s*([^\n\.;:,]{2,80})'
+    ]
+
+    for pattern in patterns:
+        m = re.search(pattern, text, flags=re.IGNORECASE)
+        if not m:
+            continue
+
+        name = re.sub(r'\s+', ' ', m.group(1)).strip()
+        name = re.sub(r'\s*\(.*?\)\s*', '', name).strip()
+        if name and len(name.split()) <= 6:
+            return name
+
+    return None
+
+
 @bot.event
 async def on_ready():
     print(f'{bot.user} has connected to Discord!')
@@ -394,9 +429,12 @@ async def process_question(ctx, question: str):
             assistant_message = ""
 
             needs_position_and_bio = requires_position_and_bio(question)
-            needs_current_research = is_current_affairs_question(question)
+            min_search = 1
+            min_pages = 2 if needs_position_and_bio else 1
             tool_counts = {"search_wikipedia": 0, "get_wikipedia_page": 0}
-            forced_tool_attempts = 0
+            last_search_results: List[str] = []
+            incumbent_title: Optional[str] = None
+            desired_query = suggest_wikipedia_query(question)
 
             while iteration < max_iterations:
                 iteration += 1
@@ -421,8 +459,32 @@ async def process_question(ctx, question: str):
                         tool_calls = tagged_tool_calls
                         assistant_content = remove_tool_tags(raw_content)
 
+                unmet_requirements = (
+                    tool_counts["search_wikipedia"] < min_search
+                    or tool_counts["get_wikipedia_page"] < min_pages
+                )
+
+                forced_tool = False
+                if not tool_calls and unmet_requirements:
+                    forced_tool = True
+
+                    if tool_counts["search_wikipedia"] < min_search:
+                        tool_calls = [make_tool_call("search_wikipedia", {"query": desired_query})]
+                    else:
+                        if needs_position_and_bio and tool_counts["get_wikipedia_page"] == 1 and incumbent_title:
+                            title = incumbent_title
+                        else:
+                            title = choose_wikipedia_title(desired_query, last_search_results)
+
+                        tool_calls = [make_tool_call("get_wikipedia_page", {"title": title})]
+
+                    raw_content = ""
+                    assistant_content = ""
+
                 thinking = extract_thinking(raw_content)
-                if not thinking and tool_calls:
+                if forced_tool and tool_calls:
+                    thinking = synthesize_thinking(question, tool_calls[0])
+                elif not thinking and tool_calls:
                     thinking = synthesize_thinking(question, tool_calls[0])
 
                 if thinking:
@@ -432,54 +494,11 @@ async def process_question(ctx, question: str):
                         last_thinking_sent_key = thinking_key
 
                 if not tool_calls:
-                    assistant_message_candidate = clean_llm_text(raw_content)
-
-                    min_search = 0
-                    min_pages = 0
-                    if needs_position_and_bio:
-                        min_search = 1
-                        min_pages = 2
-                    elif needs_current_research:
-                        min_search = 1
-                        min_pages = 1
-                    elif detect_tool_intent(raw_content):
-                        min_search = 1
-
-                    unmet_requirements = (
-                        (min_search and tool_counts["search_wikipedia"] < min_search)
-                        or (min_pages and tool_counts["get_wikipedia_page"] < min_pages)
-                    )
-
-                    if unmet_requirements and forced_tool_attempts < 5:
-                        forced_tool_attempts += 1
-                        messages.append({"role": "assistant", "content": assistant_content or ""})
-
-                        if tool_counts["search_wikipedia"] < min_search:
-                            query = suggest_wikipedia_query(question)
-                            messages.append({
-                                "role": "system",
-                                "content": (
-                                    "Tool call required. Call search_wikipedia next. "
-                                    f"Use this query: {query}. "
-                                    "Respond with a tool call only; do not answer yet."
-                                )
-                            })
-                        else:
-                            messages.append({
-                                "role": "system",
-                                "content": (
-                                    "Tool call required. Continue research by calling get_wikipedia_page using the best matching title from the last search results. "
-                                    "Respond with a tool call only; do not answer yet."
-                                )
-                            })
-
-                        continue
-
-                    assistant_message = assistant_message_candidate
+                    assistant_message = clean_llm_text(response_msg.content or "")
                     if assistant_message.strip():
                         break
 
-                    messages.append({"role": "assistant", "content": assistant_content or raw_content or ""})
+                    messages.append({"role": "assistant", "content": assistant_content or response_msg.content or ""})
                     continue
                 
                 # Add assistant's response with tool calls
@@ -512,12 +531,22 @@ async def process_question(ctx, question: str):
                         search_msg = f"🔍 **Searching Wikipedia...**\n\n> \"{query}\""
                         await ctx.send(search_msg)
                         tool_result = await execute_wiki_search(query)
-                        
+
+                        try:
+                            data = json.loads(tool_result)
+                            last_search_results = list(data.get('results') or [])
+                        except Exception:
+                            last_search_results = []
+
                     elif fname == "get_wikipedia_page":
                         title = fargs.get('title', '')
                         read_msg = f"📖 **Reading Article...**\n\n> \"{title}\""
                         await ctx.send(read_msg)
                         tool_result = await execute_wiki_page(title)
+
+                        if needs_position_and_bio and tool_counts.get("get_wikipedia_page", 0) == 0 and not incumbent_title:
+                            incumbent_title = extract_incumbent_title_from_position_page(tool_result)
+
                         wiki_url = f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}"
                         if wiki_url not in sources_used:
                             sources_used.append(wiki_url)
