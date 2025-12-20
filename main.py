@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 import os
 import json
+import re
+import uuid
+from types import SimpleNamespace
+from typing import List, Optional
+
 import discord
 import wikipedia
 from discord.ext import commands
 from groq import Groq
 from dotenv import load_dotenv
-import re
 
 # Load environment variables
 load_dotenv()
@@ -112,6 +116,101 @@ def remove_thinking_tags(text):
         return ""
     return re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
 
+
+def remove_tool_tags(text: str) -> str:
+    if not text:
+        return ""
+    text = re.sub(r'<search_wikipedia>.*?</search_wikipedia>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<get_wikipedia_page>.*?</get_wikipedia_page>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    return text.strip()
+
+
+def clean_llm_text(text: str) -> str:
+    return remove_tool_tags(remove_thinking_tags(text or "")).strip()
+
+
+def format_blockquote(text: str) -> str:
+    lines = (text or "").strip().splitlines() or [""]
+    return "\n".join(f"> {line}" if line else ">" for line in lines)
+
+
+def make_tool_call(name: str, arguments: dict) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=f"call_{uuid.uuid4().hex}",
+        function=SimpleNamespace(name=name, arguments=json.dumps(arguments))
+    )
+
+
+def extract_tagged_tool_calls(text: str) -> List[SimpleNamespace]:
+    if not text:
+        return []
+
+    calls: List[SimpleNamespace] = []
+
+    for block in re.findall(r'<search_wikipedia>(.*?)</search_wikipedia>', text, flags=re.DOTALL | re.IGNORECASE):
+        query = None
+        m = re.search(r'<query>(.*?)</query>', block, flags=re.DOTALL | re.IGNORECASE)
+        if m:
+            query = m.group(1).strip()
+        else:
+            try:
+                obj = json.loads(block.strip())
+                query = (obj or {}).get('query')
+            except Exception:
+                query = None
+
+        if not query:
+            candidate = block.strip()
+            if candidate and '<' not in candidate and '>' not in candidate:
+                query = candidate
+
+        if query:
+            calls.append(make_tool_call('search_wikipedia', {'query': str(query)}))
+
+    for block in re.findall(r'<get_wikipedia_page>(.*?)</get_wikipedia_page>', text, flags=re.DOTALL | re.IGNORECASE):
+        title = None
+        m = re.search(r'<title>(.*?)</title>', block, flags=re.DOTALL | re.IGNORECASE)
+        if m:
+            title = m.group(1).strip()
+        else:
+            try:
+                obj = json.loads(block.strip())
+                title = (obj or {}).get('title')
+            except Exception:
+                title = None
+
+        if not title:
+            candidate = block.strip()
+            if candidate and '<' not in candidate and '>' not in candidate:
+                title = candidate
+
+        if title:
+            calls.append(make_tool_call('get_wikipedia_page', {'title': str(title)}))
+
+    return calls
+
+
+def synthesize_thinking(question: str, tool_call: SimpleNamespace) -> Optional[str]:
+    try:
+        args = json.loads(tool_call.function.arguments)
+    except Exception:
+        args = {}
+
+    if tool_call.function.name == 'search_wikipedia':
+        query = args.get('query')
+        if query:
+            return (
+                "The user is asking a current-events question. Since I don't have information after 2023, "
+                f"I need to search Wikipedia. I'll start by searching for '{query}'."
+            )
+
+    if tool_call.function.name == 'get_wikipedia_page':
+        title = args.get('title')
+        if title:
+            return f"I'll read the Wikipedia article '{title}' to extract the up-to-date information I need."
+
+    return None
+
 @bot.event
 async def on_ready():
     print(f'{bot.user} has connected to Discord!')
@@ -187,6 +286,7 @@ async def process_question(ctx, question: str):
             "⚠️ CRITICAL RULES:\n"
             "- You have NO knowledge after 2023. MUST research current information.\n"
             "- ALWAYS write <think>...</think> BEFORE calling any tool\n"
+            "- When calling tools, do NOT write XML-like tool tags (e.g. <search_wikipedia>...</search_wikipedia>) in your text. Use tool calling only.\n"
             "- In <think> blocks, explain: what you need, why, and what you'll do\n"
             "- After getting tool results, write another <think> about what you learned\n"
             "- Continue researching until you have comprehensive information\n"
@@ -224,10 +324,12 @@ async def process_question(ctx, question: str):
             sources_used = []
             max_iterations = 20
             iteration = 0
-            
+            last_thinking_sent_key = None
+            assistant_message = ""
+
             while iteration < max_iterations:
                 iteration += 1
-                
+
                 response = groq_client.chat.completions.create(
                     model=GROQ_MODEL,
                     messages=messages,
@@ -236,31 +338,40 @@ async def process_question(ctx, question: str):
                     temperature=GROQ_TEMPERATURE,
                     max_tokens=2000
                 )
-                
+
                 response_msg = response.choices[0].message
-                tool_calls = response_msg.tool_calls
-                
-                # ALWAYS check for and display thinking first
-                if response_msg.content:
-                    thinking = extract_thinking(response_msg.content)
-                    if thinking:
-                        thinking_msg = f"🧠 **Thinking...**\n\n> {thinking}"
-                        await ctx.send(thinking_msg)
-                
-                # If no tool calls, this is the final answer
+                raw_content = response_msg.content or ""
+                tool_calls = response_msg.tool_calls or []
+                assistant_content = raw_content
+
+                if not tool_calls and raw_content:
+                    tagged_tool_calls = extract_tagged_tool_calls(raw_content)
+                    if tagged_tool_calls:
+                        tool_calls = tagged_tool_calls
+                        assistant_content = remove_tool_tags(raw_content)
+
+                thinking = extract_thinking(raw_content)
+                if not thinking and tool_calls:
+                    thinking = synthesize_thinking(question, tool_calls[0])
+
+                if thinking:
+                    thinking_key = re.sub(r'\s+', ' ', thinking).strip().lower()
+                    if thinking_key and thinking_key != last_thinking_sent_key:
+                        await ctx.send(f"🧠 **Thinking...**\n\n{format_blockquote(thinking)}")
+                        last_thinking_sent_key = thinking_key
+
                 if not tool_calls:
-                    assistant_message = remove_thinking_tags(response_msg.content) if response_msg.content else ""
+                    assistant_message = clean_llm_text(raw_content)
                     if assistant_message.strip():
                         break
-                    else:
-                        # Empty response, continue
-                        messages.append({"role": "assistant", "content": response_msg.content or ""})
-                        continue
+
+                    messages.append({"role": "assistant", "content": assistant_content or raw_content or ""})
+                    continue
                 
                 # Add assistant's response with tool calls
                 messages.append({
                     "role": "assistant",
-                    "content": response_msg.content or "",
+                    "content": assistant_content or "",
                     "tool_calls": [
                         {
                             "id": tc.id,
@@ -272,12 +383,15 @@ async def process_question(ctx, question: str):
                         } for tc in tool_calls
                     ]
                 })
-                
+
                 # Execute tools and display actions
                 for tool_call in tool_calls:
                     fname = tool_call.function.name
-                    fargs = json.loads(tool_call.function.arguments)
-                    
+                    try:
+                        fargs = json.loads(tool_call.function.arguments)
+                    except Exception:
+                        fargs = {}
+
                     tool_result = ""
                     if fname == "search_wikipedia":
                         query = fargs.get('query', '')
