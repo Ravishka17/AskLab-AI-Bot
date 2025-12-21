@@ -189,154 +189,28 @@ def extract_tagged_tool_calls(text: str) -> List[SimpleNamespace]:
     return calls
 
 
-def detect_tool_intent(text: str) -> bool:
-    if not text:
-        return False
-    patterns = [
-        r'\bsearch\b.*\bwikipedia\b',
-        r'\bsearch wikipedia\b',
-        r'\bsearching wikipedia\b',
-        r'\bread\b.*\bwikipedia\b',
-        r"\b(i\s*(?:'m| am| will|\s*'ll)\s+search)\b",
-        r"\b(i\s*(?:'m| am| will|\s*'ll)\s+look\s+up)\b",
-        r'\bsince i don\s*\x27?t have information after 2023\b'
-    ]
-    return any(re.search(p, text, flags=re.IGNORECASE | re.DOTALL) for p in patterns)
-
-
-def is_current_affairs_question(question: str) -> bool:
-    q = (question or "").lower()
-    if any(word in q for word in ["current", "today", "now", "latest", "as of"]):
-        return True
-
-    roles = [
-        "president",
-        "prime minister",
-        "pm",
-        "ceo",
-        "leader",
-        "monarch",
-        "king",
-        "queen",
-        "chancellor",
-        "governor",
-        "mayor"
-    ]
-
-    if ("who" in q or "who's" in q or "whos" in q) and any(role in q for role in roles):
-        return True
-
-    if any(role in q for role in ["president", "prime minister", "pm"]) and any(word in q for word in ["current", "incumbent"]):
-        return True
-
-    return False
-
-
-def requires_position_and_bio(question: str) -> bool:
-    q = (question or "").lower()
-    return is_current_affairs_question(q) and any(role in q for role in ["president", "prime minister", "pm"])
-
-
-def is_followup_question(question: str) -> bool:
-    q = (question or "").strip().lower()
-    if not q:
-        return False
-
-    if re.search(r'\b(him|her|them|it|this|that|he|she|they)\b', q) and len(q) <= 80:
-        return True
-
-    if any(q.startswith(prefix) for prefix in [
-        "tell me more",
-        "more about",
-        "tell me about",
-        "who is he",
-        "who is she",
-        "who are they",
-        "what is it",
-        "what about"
-    ]):
-        return True
-
-    return False
-
-
-def resolve_followup_question(question: str, subject: str) -> str:
-    subject = (subject or "").strip()
-    if not subject:
-        return question
-
-    q = (question or "").strip()
-    ql = q.lower()
-
-    if re.search(r'\b(tell me more about|more about)\s+(him|her|them|it|this|that)\b', ql):
-        return f"Tell me more about {subject}."
-
-    if re.search(r'^tell me more\b', ql):
-        return f"Tell me more about {subject}."
-
-    if re.search(r'^tell me about\b', ql) and re.search(r'\b(him|her|them|it|this|that)\b', ql):
-        return f"Tell me about {subject}."
-
-    if re.search(r'^who is\s+(he|she|they)\b', ql):
-        return f"Who is {subject}?"
-
-    if re.search(r'^what about\s+(him|her|them|it|this|that)\b', ql):
-        return f"What about {subject}?"
-
-    return f"{q.rstrip('?.!')} (referring to: {subject})."
-
-
-def suggest_wikipedia_query(question: str) -> str:
-    q = (question or "").strip()
-    m = re.search(r'\b(president|prime minister)\s+of\s+([^\?\.\n]+)', q, flags=re.IGNORECASE)
-    if m:
-        role = m.group(1).title()
-        subject = m.group(2).strip()
-        return f"{role} of {subject}"
-
-    m = re.search(r"\b(?:tell me about|what is|who is|who's|whos)\s+(.+)", q, flags=re.IGNORECASE)
-    if m:
-        subject = m.group(1).strip().rstrip('?.!')
-        if subject:
-            return subject
-
-    return q.rstrip('?.!')
-
-
-def choose_wikipedia_title(desired: str, results: List[str]) -> str:
-    desired_norm = (desired or "").strip().lower()
-    if desired_norm:
-        for r in results or []:
-            if (r or "").strip().lower() == desired_norm:
-                return r
-        for r in results or []:
-            r_norm = (r or "").strip().lower()
-            if desired_norm in r_norm or r_norm in desired_norm:
-                return r
-
-    return (results[0] if results else desired).strip()
-
-
-def extract_incumbent_title_from_position_page(text: str) -> Optional[str]:
+def extract_subject_from_context(text: str) -> Optional[str]:
+    """Extract subject name from context when user asks follow-up questions"""
     if not text:
         return None
-
+    
+    # Simple extraction for common follow-up patterns
     patterns = [
-        r'\bThe incumbent is\s+([^\n\.;:,]{2,80})',
-        r'\bincumbent is\s+([^\n\.;:,]{2,80})',
-        r'\bIncumbent\s*[:\-]\s*([^\n\.;:,]{2,80})'
+        r'\b(Tell me more about|More about|Tell me about|Who is)\s+([A-Z][a-zA-Z\s]+?)(?:\.|\?|!|$)',
+        r'\b(about him|about her|about them|about it|this|that)\b',
     ]
-
+    
     for pattern in patterns:
         m = re.search(pattern, text, flags=re.IGNORECASE)
-        if not m:
-            continue
-
-        name = re.sub(r'\s+', ' ', m.group(1)).strip()
-        name = re.sub(r'\s*\(.*?\)\s*', '', name).strip()
-        if name and len(name.split()) <= 6:
-            return name
-
+        if m:
+            if len(m.groups()) >= 2:
+                subject = m.group(2).strip()
+                if subject and len(subject.split()) <= 6:
+                    return subject
+            else:
+                # Return the pronoun/context word
+                return m.group(1).strip()
+    
     return None
 
 
@@ -395,10 +269,15 @@ async def moderate_message(message):
 async def process_question(ctx, question: str):
     channel_id = ctx.channel.id
 
-    if is_followup_question(question):
-        last_subject = last_subject_by_channel.get(channel_id)
-        if last_subject:
-            question = resolve_followup_question(question, last_subject)
+    # Handle follow-up questions using context
+    last_subject = last_subject_by_channel.get(channel_id)
+    if last_subject:
+        extracted_subject = extract_subject_from_context(question)
+        if extracted_subject and extracted_subject.lower() in ['him', 'her', 'them', 'it', 'this', 'that']:
+            question = f"Tell me more about {last_subject}."
+        elif any(word in question.lower() for word in ['tell me more', 'more about', 'who is he', 'who is she', 'who are they']):
+            if not any(name in question for name in [last_subject]):
+                question = f"Tell me more about {last_subject}."
 
     conversation_history[channel_id] = [{"role": "user", "content": question}]
 
@@ -408,43 +287,43 @@ async def process_question(ctx, question: str):
             "You are AskLab AI - a reasoning assistant with Wikipedia research capabilities.\n\n"
             "🎯 YOUR THINKING PROCESS:\n"
             "You must ALWAYS think BEFORE taking action. Your workflow is:\n\n"
-            "1. <think>Plan what you need to find and what to search</think> → Then call search/read tool\n"
-            "2. [Tool executes and returns results]\n"
-            "3. <think>Analyze what you found and plan next step</think> → Then call next tool OR give final answer\n"
-            "4. Repeat until you have complete information\n\n"
+            "1. <think>Initiating the Dialogue\n"
+            "I've processed the user's [input] and recognized it as [type of request]. Now, I'm formulating my response and determining if research is needed.\n\n"
+            "**Drafting a Response**\n"
+            "I've crafted [my response]. My goal is to [reasoning about the response] and [intended purpose].</think> → Either respond naturally OR call research tool\n"
+            "2. [Tool executes and returns results] (if research was needed)\n"
+            "3. <think>Analyzing the Results\n"
+            "I found [key information]. Now I need to [plan next step] OR provide the final answer based on what I learned.</think> → Either call next tool OR give final answer\n"
+            "4. Continue until complete\n\n"
             "⚠️ CRITICAL RULES:\n"
-            "- You have NO knowledge after 2023. MUST research current information.\n"
-            "- ALWAYS write <think>...</think> BEFORE calling any tool\n"
-            "- When calling tools, do NOT write XML-like tool tags (e.g. <search_wikipedia>...</search_wikipedia>) in your text. Use tool calling only.\n"
+            "- You have NO knowledge after 2023. MUST research current information when needed.\n"
+            "- ALWAYS write <think>...</think> BEFORE calling any tool OR giving complex responses\n"
+            "- When calling tools, use tool calling only. Do NOT write XML-like tags.\n"
             "- In <think> blocks, explain: what you need, why, and what you'll do\n"
-            "- After getting tool results, write another <think> about what you learned\n"
-            "- Continue researching until you have comprehensive information\n"
-            "- For current president/PM questions: research the position page AND the person's biographical page\n"
+            "- For greetings/conversational responses: provide natural, contextual replies\n"
+            "- For research questions: continue until you have comprehensive information\n"
             "- search_wikipedia returns JSON: {\"results\": [\"Title 1\", ...]}\n"
-            "- Your final answer should NOT contain <think> tags\n\n"
+            "- Your final answer should NOT contain <think> tags\n"
+            "- For follow-up questions, use context from previous conversation\n\n"
 
-            "Response 1:\n"
-            "<think>The user is asking about the current president of Sri Lanka. Since I don't have information after 2023, I need to search Wikipedia. I'll start by searching for 'President of Sri Lanka' to find who currently holds this position.</think>\n"
-            "[Then the system will call search_wikipedia]\n\n"
-            "After search results come back:\n"
-            "Response 2:\n"
-            "<think>Good, I found the 'President of Sri Lanka' page. Let me read this article to find out who the current president is.</think>\n"
-            "[Then the system will call get_wikipedia_page('President of Sri Lanka')]\n\n"
-            "After reading the position page:\n"
-            "Response 3:\n"
-            "<think>Alright, I found out that the current president is Anura Kumara Dissanayake. He took office in September 2024. Now I need to search for more detailed information about him by reading his biographical page on Wikipedia.</think>\n"
-            "[Then the system will call get_wikipedia_page('Anura Kumara Dissanayake')]\n\n"
-            "After reading his biographical page:\n"
-            "Response 4:\n"
-            "<think>Perfect! I now have comprehensive information. He won the 2024 election on September 21, took office September 23, leads the JVP and NPP alliance, and his victory was historic for requiring second-preference vote counting. I have all the information needed to provide a complete answer.</think>\n\n"
-            "The current President of Sri Lanka is **Anura Kumara Dissanayake**.\n\n"
-            "He assumed office on September 23, 2024...\n"
-            "[Full detailed answer]\n\n"
+            "**EXAMPLES:**\n\n"
+            "For a greeting:\n"
+            "<think>**Initiating the Dialogue**\n"
+            "I've processed the user's initial \"Hi!\" and recognized it as a standard greeting. Now, I'm formulating a polite and welcoming response. My focus is on crafting a reply that establishes a friendly and open tone for the conversation ahead.\n\n"
+            "**Drafting a Response**\n"
+            "I've crafted a general, welcoming greeting: \"Hello! How can I help you today?\" I wanted to ensure it was universally applicable, given the lack of initial context. The goal is to set a friendly and helpful tone from the outset, paving the way for a productive conversation.</think>\n"
+            "Hello! How can I help you today?\n\n"
+            "For a research question:\n"
+            "<think>**Initiating the Dialogue**\n"
+            "I've processed the user's question about [topic]. This appears to be asking for current information, so I need to research this topic to provide accurate, up-to-date information.\n\n"
+            "**Drafting a Response**\n"
+            "I'll start by searching Wikipedia for relevant information. I need to find [specific information needed] to provide a comprehensive answer.</think>\n"
+            "[Tool call would happen here]\n\n"
             "🔑 KEY POINTS:\n"
-            "- Think → Act → Think → Act → Think → Final Answer\n"
+            "- Think → Act → Think → Act → Think → Final Answer (for research)\n"
+            "- Think → Natural Response (for conversations)\n"
             "- NEVER skip thinking steps\n"
-            "- Research thoroughly (multiple pages for complete info)\n"
-            "- Only give final answer when you have all information needed"
+            "- Adapt your response style to the request type"
         )
     }
 
@@ -459,14 +338,12 @@ async def process_question(ctx, question: str):
             last_thinking_sent_key = None
             assistant_message = ""
 
-            needs_position_and_bio = requires_position_and_bio(question)
-            min_search = 1
-            min_pages = 2 if needs_position_and_bio else 1
+            # Let AI decide when to use tools - no rigid requirements
+            min_search = 0
+            min_pages = 0
             tool_counts = {"search_wikipedia": 0, "get_wikipedia_page": 0}
             last_search_results: List[str] = []
-            incumbent_title: Optional[str] = None
             last_read_title: Optional[str] = None
-            desired_query = suggest_wikipedia_query(question)
 
             progress_entries: List[str] = []
             progress_msg = await ctx.send("🧠 **Working...**")
@@ -498,43 +375,9 @@ async def process_question(ctx, question: str):
                 elif tool_counts["get_wikipedia_page"] < min_pages:
                     required_tool = "get_wikipedia_page"
 
+                # Let AI decide what tools to use without specific guidance
                 completion_tools = TOOLS[1:]
                 completion_messages = messages
-
-                if required_tool:
-                    completion_tools = [
-                        t for t in TOOLS[1:]
-                        if t.get("function", {}).get("name") == required_tool
-                    ]
-
-                    guidance = None
-                    if required_tool == "search_wikipedia":
-                        guidance = (
-                            "Your next message must call the search_wikipedia tool. "
-                            f"Search for: {desired_query}. "
-                            "Include your reasoning ONLY inside <think>...</think>."
-                        )
-                    elif required_tool == "get_wikipedia_page":
-                        if tool_counts["get_wikipedia_page"] == 0:
-                            guidance = (
-                                "Your next message must call the get_wikipedia_page tool using one of the titles from the last search results. "
-                                "Include your reasoning ONLY inside <think>...</think>."
-                            )
-                        elif needs_position_and_bio:
-                            if incumbent_title:
-                                guidance = (
-                                    "Your next message must call the get_wikipedia_page tool for the incumbent's biography page. "
-                                    f"Use this title: {incumbent_title}. "
-                                    "Include your reasoning ONLY inside <think>...</think>."
-                                )
-                            else:
-                                guidance = (
-                                    "Your next message must call the get_wikipedia_page tool for the incumbent's biography page (the person's name you identified from the position page). "
-                                    "Include your reasoning ONLY inside <think>...</think>."
-                                )
-
-                    if guidance:
-                        completion_messages = messages + [{"role": "system", "content": guidance}]
 
                 response = groq_client.chat.completions.create(
                     model=GROQ_MODEL,
@@ -615,8 +458,7 @@ async def process_question(ctx, question: str):
                         await update_progress(read_msg)
                         tool_result = await execute_wiki_page(title)
 
-                        if needs_position_and_bio and tool_counts.get("get_wikipedia_page", 0) == 0 and not incumbent_title:
-                            incumbent_title = extract_incumbent_title_from_position_page(tool_result)
+                        # Remove rigid incumbent extraction logic
 
                         wiki_url = f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}"
                         if wiki_url not in sources_used:
@@ -649,9 +491,8 @@ async def process_question(ctx, question: str):
 
             last_subject = (
                 (last_read_title or "").strip()
-                or (incumbent_title or "").strip()
                 or (last_search_results[0].strip() if last_search_results else "")
-                or desired_query
+                or (question.split('about')[-1].strip() if 'about' in question.lower() else "")
             )
             if last_subject:
                 last_subject_by_channel[channel_id] = last_subject
