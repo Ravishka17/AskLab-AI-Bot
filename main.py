@@ -108,16 +108,22 @@ async def execute_wiki_search(query):
                 "format": "json",
                 "srlimit": 5
             }
+            headers = {
+                "User-Agent": "AskLab-AI-Discord-Bot/1.0 (https://github.com/yourusername/yourrepo)"
+            }
             
-            async with session.get(url, params=params) as response:
+            async with session.get(url, params=params, headers=headers) as response:
                 if response.status == 200:
                     data = await response.json()
                     search_results = data.get("query", {}).get("search", [])
                     titles = [result["title"] for result in search_results]
                     return json.dumps({"results": titles})
                 else:
-                    return json.dumps({"results": [], "error": f"HTTP {response.status}"})
+                    error_text = await response.text()
+                    print(f"Wikipedia search error: HTTP {response.status} - {error_text}")
+                    return json.dumps({"results": [], "error": f"HTTP {response.status}: {error_text}"})
     except Exception as e:
+        print(f"Exception in Wikipedia search: {str(e)}")
         return json.dumps({"results": [], "error": str(e)})
 
 async def execute_wiki_page(title):
@@ -133,11 +139,17 @@ async def execute_wiki_page(title):
                 "exintro": False,
                 "exlimit": 1
             }
+            headers = {
+                "User-Agent": "AskLab-AI-Discord-Bot/1.0 (https://github.com/yourusername/yourrepo)"
+            }
             
-            async with session.get(url, params=params) as response:
+            async with session.get(url, params=params, headers=headers) as response:
                 if response.status == 200:
                     data = await response.json()
                     pages = data.get("query", {}).get("pages", {})
+                    
+                    if not pages:
+                        return f"No page data found for '{title}'"
                     
                     # Get the first page (there should only be one)
                     page_id = list(pages.keys())[0]
@@ -173,8 +185,11 @@ async def execute_wiki_page(title):
                     
                     return content
                 else:
-                    return f"Error reading page: HTTP {response.status}"
+                    error_text = await response.text()
+                    print(f"Wikipedia page error: HTTP {response.status} - {error_text}")
+                    return f"Error reading page: HTTP {response.status}: {error_text}"
     except Exception as e:
+        print(f"Exception in Wikipedia page fetch: {str(e)}")
         return f"Error reading page: {str(e)}"
 
 async def execute_deploy_html(html_content):
@@ -194,9 +209,25 @@ async def execute_deploy_html(html_content):
             }
             headers = {"Content-Type": "application/json"}
             
+            print(f"Making MCP deployment request to {url}")
             async with session.post(url, json=payload, headers=headers) as response:
+                response_text = await response.text()
+                print(f"MCP Response status: {response.status}")
+                print(f"MCP Response body: {response_text[:500]}")
+                
                 if response.status == 200:
-                    data = await response.json()
+                    try:
+                        data = json.loads(response_text)
+                    except json.JSONDecodeError as json_error:
+                        print(f"JSON decode error: {json_error}")
+                        return json.dumps({"success": False, "error": f"Invalid JSON response: {response_text[:500]}"})
+                    
+                    if "error" in data:
+                        # MCP returned an error
+                        error_data = data.get("error", {})
+                        error_message = error_data.get("message", str(error_data))
+                        return json.dumps({"success": False, "error": f"MCP Error: {error_message}"})
+                    
                     result = data.get("result", {})
                     share_url = result.get("shareUrl", "")
                     
@@ -216,11 +247,17 @@ async def execute_deploy_html(html_content):
                             # Already in correct format
                             return json.dumps({"success": True, "url": share_url})
                     else:
-                        return json.dumps({"success": False, "error": "No share URL returned"})
+                        error_msg = f"No shareUrl in result. Response: {data}"
+                        print(error_msg)
+                        return json.dumps({"success": False, "error": error_msg})
                 else:
-                    error_text = await response.text()
-                    return json.dumps({"success": False, "error": f"HTTP {response.status}: {error_text}"})
+                    error_msg = f"HTTP {response.status}: {response_text[:500]}"
+                    print(error_msg)
+                    return json.dumps({"success": False, "error": error_msg})
     except Exception as e:
+        import traceback
+        error_msg = f"Exception in execute_deploy_html: {str(e)}\n{traceback.format_exc()}"
+        print(error_msg)
         return json.dumps({"success": False, "error": str(e)})
 
 def extract_thinking(text):
