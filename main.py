@@ -199,8 +199,22 @@ async def execute_deploy_html(html_content):
                     data = await response.json()
                     result = data.get("result", {})
                     share_url = result.get("shareUrl", "")
+                    
                     if share_url:
-                        return json.dumps({"success": True, "url": share_url})
+                        # Check if it's a COS URL and convert to the proper share URL format
+                        if "cos.accelerate.myqcloud.com" in share_url:
+                            # Extract the filename (UUID) from the COS URL
+                            # Format: https://mcp-1253240811.cos.accelerate.myqcloud.com/{uuid}.html
+                            filename = share_url.split("/")[-1]  # Gets {uuid}.html
+                            file_id = filename.replace(".html", "")  # Remove .html extension
+                            
+                            # Construct the proper share URL format
+                            # Format: https://mcp.edgeone.site/share/{id}
+                            proper_url = f"https://mcp.edgeone.site/share/{file_id}"
+                            return json.dumps({"success": True, "url": proper_url})
+                        else:
+                            # Already in correct format
+                            return json.dumps({"success": True, "url": share_url})
                     else:
                         return json.dumps({"success": False, "error": "No share URL returned"})
                 else:
@@ -522,8 +536,8 @@ async def process_question(ctx, question: str):
                     if iteration <= 2:
                         # Retry on first two attempts
                         await update_progress("⚠️ Retrying...")
-                        import time
-                        time.sleep(1)
+                        import asyncio
+                        await asyncio.sleep(1)
                         try:
                             response = groq_client.chat.completions.create(
                                 model=GROQ_MODEL,
