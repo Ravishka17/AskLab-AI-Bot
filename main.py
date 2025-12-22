@@ -106,7 +106,7 @@ async def execute_wiki_search(query):
                 "list": "search",
                 "srsearch": query,
                 "format": "json",
-                "srlimit": 5
+                "srlimit": "5"  # Changed to string
             }
             headers = {
                 "User-Agent": "AskLab-AI-Discord-Bot/1.0 (https://github.com/yourusername/yourrepo)"
@@ -133,11 +133,10 @@ async def execute_wiki_page(title):
             params = {
                 "action": "query",
                 "prop": "extracts",
-                "explaintext": True,
+                "explaintext": "1",  # Use string "1" instead of boolean True
                 "titles": title,
                 "format": "json",
-                "exintro": False,
-                "exlimit": 1
+                "exlimit": "1"  # Use string "1" instead of integer
             }
             headers = {
                 "User-Agent": "AskLab-AI-Discord-Bot/1.0 (https://github.com/yourusername/yourrepo)"
@@ -158,7 +157,7 @@ async def execute_wiki_page(title):
                     if "missing" in page_data:
                         return f"Page '{title}' not found."
                     
-                    if "redirect" in page_data:
+                    if page_data.get("redirect"):  # Check if it's a redirect
                         return f"Page '{title}' is a redirect. Use the target page title instead."
                     
                     title_text = page_data.get("title", title)
