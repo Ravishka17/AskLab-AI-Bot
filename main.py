@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from typing import List, Optional
 
 import discord
-import wikipedia
+import aiohttp
 from discord.ext import commands
 from groq import Groq
 from dotenv import load_dotenv
@@ -71,7 +71,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_wikipedia_page",
-            "description": "Read a Wikipedia page by its exact title. Use this after searching to get detailed information.",
+            "description": "Read a Wikipedia page by its exact title using the official Wikipedia API. Use this after searching to get detailed information.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -80,25 +80,134 @@ TOOLS = [
                 "required": ["title"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "deploy_html",
+            "description": "Deploy HTML code to a public URL using EdgeOne MCP. The AI should provide the HTML code and this tool will host it, returning a hyperlink to the hosted page.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "value": {"type": "string", "description": "The HTML code to deploy"}
+                },
+                "required": ["value"]
+            }
+        }
     }
 ]
 
 async def execute_wiki_search(query):
     try:
-        results = wikipedia.search(query)
-        return json.dumps({"results": results[:5]})
+        async with aiohttp.ClientSession() as session:
+            url = "https://en.wikipedia.org/w/api.php"
+            params = {
+                "action": "query",
+                "list": "search",
+                "srsearch": query,
+                "format": "json",
+                "srlimit": 5
+            }
+            
+            async with session.get(url, params=params) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    search_results = data.get("query", {}).get("search", [])
+                    titles = [result["title"] for result in search_results]
+                    return json.dumps({"results": titles})
+                else:
+                    return json.dumps({"results": [], "error": f"HTTP {response.status}"})
     except Exception as e:
         return json.dumps({"results": [], "error": str(e)})
 
 async def execute_wiki_page(title):
     try:
-        page = wikipedia.page(title, auto_suggest=False)
-        content = f"Summary: {page.summary}\n\nDetails: {page.content[:1500]}"
-        return content
-    except wikipedia.DisambiguationError as e:
-        return f"Ambiguous title. Options: {', '.join(e.options[:5])}"
+        async with aiohttp.ClientSession() as session:
+            url = "https://en.wikipedia.org/w/api.php"
+            params = {
+                "action": "query",
+                "prop": "extracts",
+                "explaintext": True,
+                "titles": title,
+                "format": "json",
+                "exintro": False,
+                "exlimit": 1
+            }
+            
+            async with session.get(url, params=params) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    pages = data.get("query", {}).get("pages", {})
+                    
+                    # Get the first page (there should only be one)
+                    page_id = list(pages.keys())[0]
+                    page_data = pages[page_id]
+                    
+                    if "missing" in page_data:
+                        return f"Page '{title}' not found."
+                    
+                    if "redirect" in page_data:
+                        return f"Page '{title}' is a redirect. Use the target page title instead."
+                    
+                    title_text = page_data.get("title", title)
+                    extract = page_data.get("extract", "")
+                    
+                    # Handle disambiguation pages
+                    if extract.startswith(f"{title_text} may refer to:"):
+                        # Extract disambiguation options
+                        lines = extract.split("\n")[1:]  # Skip the first line
+                        options = []
+                        for line in lines:
+                            if line.strip().startswith("•"):
+                                option = line.strip("• ").split("(")[0].strip()
+                                if option and option != title_text and len(options) < 5:
+                                    options.append(option)
+                        return f"Ambiguous title. Options: {', '.join(options)}"
+                    
+                    summary = extract[:500] if extract else ""
+                    details = extract[500:2000] if len(extract) > 500 else ""
+                    
+                    content = f"Summary: {summary}"
+                    if details:
+                        content += f"\n\nDetails: {details}"
+                    
+                    return content
+                else:
+                    return f"Error reading page: HTTP {response.status}"
     except Exception as e:
         return f"Error reading page: {str(e)}"
+
+async def execute_deploy_html(html_content):
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = "https://mcp-on-edge.edgeone.app/mcp-server"
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "deploy-html",
+                    "arguments": {
+                        "value": html_content
+                    }
+                }
+            }
+            headers = {"Content-Type": "application/json"}
+            
+            async with session.post(url, json=payload, headers=headers) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    result = data.get("result", {})
+                    share_url = result.get("shareUrl", "")
+                    if share_url:
+                        return json.dumps({"success": True, "url": share_url})
+                    else:
+                        return json.dumps({"success": False, "error": "No share URL returned"})
+                else:
+                    error_text = await response.text()
+                    return json.dumps({"success": False, "error": f"HTTP {response.status}: {error_text}"})
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)})
 
 def extract_thinking(text):
     if not text:
@@ -211,6 +320,7 @@ async def process_question(ctx, question: str):
             "🎯 YOUR CORE CAPABILITIES:\n"
             "- Answer questions using your training knowledge (up to January 2025)\n"
             "- Research current information on Wikipedia when needed\n"
+            "- Deploy HTML code to public URLs for users to preview\n"
             "- Think step-by-step using <think>...</think> tags\n\n"
             "⚠️ MANDATORY REQUIREMENT:\n"
             "You MUST include <think>...</think> blocks in EVERY response. This is non-negotiable.\n"
@@ -229,6 +339,14 @@ async def process_question(ctx, question: str):
             "- General knowledge from your training\n"
             "- Historical facts that haven't changed\n"
             "- Casual conversation\n\n"
+            
+            "🌐 WHEN TO DEPLOY HTML:\n"
+            "Use the deploy_html tool when:\n"
+            "1. Users provide HTML code and ask to preview or see it rendered\n"
+            "2. You generate HTML code for the user and want to provide a clickable link\n"
+            "3. Users want to share their HTML page with others\n\n"
+            "When deploying HTML, always provide a clickable hyperlink to the hosted page in your response.\n"
+            "Format: [Click here to preview the HTML page]({url})\n\n"
             
             "🧠 THINKING PROCESS:\n"
             "You MUST structure ALL thinking blocks with bold section headers. Format example:\n\n"
@@ -579,6 +697,11 @@ async def process_question(ctx, question: str):
                         wiki_url = f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}"
                         if wiki_url not in sources_used:
                             sources_used.append(wiki_url)
+
+                    elif fname == "deploy_html":
+                        html_value = fargs.get('value', '')
+                        await update_progress(f"🌐 **Deploying HTML...**")
+                        tool_result = await execute_deploy_html(html_value)
 
                     tool_results.append({
                         "tool_call_id": tool_call.id,
