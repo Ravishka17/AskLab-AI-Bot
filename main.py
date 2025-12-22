@@ -133,11 +133,11 @@ async def execute_wiki_page(title):
             params = {
                 "action": "query",
                 "prop": "extracts",
-                "explaintext": True,
+                "explaintext": "true",  # Changed from True to "true" string
                 "titles": title,
                 "format": "json",
-                "exintro": False,
-                "exlimit": 1
+                "exintro": "false",     # Changed from False to "false" string
+                "exlimit": "1"          # Changed from 1 to "1" string
             }
             headers = {
                 "User-Agent": "AskLab-AI-Discord-Bot/1.0 (https://github.com/yourusername/yourrepo)"
