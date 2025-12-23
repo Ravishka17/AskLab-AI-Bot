@@ -228,9 +228,27 @@ async def execute_deploy_html(html_content):
                         return json.dumps({"success": False, "error": f"MCP Error: {error_message}"})
                     
                     result = data.get("result", {})
-                    share_url = result.get("shareUrl", "")
+                    
+                    # Try multiple possible response formats
+                    share_url = ""
+                    
+                    # Format 1: result.shareUrl (original format)
+                    if "shareUrl" in result:
+                        share_url = result["shareUrl"]
+                    # Format 2: result.content[0].text (current format from logs)
+                    elif "content" in result and isinstance(result["content"], list) and len(result["content"]) > 0:
+                        content_item = result["content"][0]
+                        if isinstance(content_item, dict) and "text" in content_item:
+                            share_url = content_item["text"]
+                    # Format 3: result.content as string
+                    elif "content" in result and isinstance(result["content"], str):
+                        share_url = result["content"]
                     
                     if share_url:
+                        # If it's already a proper share URL, return it directly
+                        if "mcp.edgeone.site/share/" in share_url:
+                            return json.dumps({"success": True, "url": share_url})
+                        
                         # Check if it's a COS URL and convert to the proper share URL format
                         if "cos.accelerate.myqcloud.com" in share_url:
                             # Extract the filename (UUID) from the COS URL
@@ -243,10 +261,10 @@ async def execute_deploy_html(html_content):
                             proper_url = f"https://mcp.edgeone.site/share/{file_id}"
                             return json.dumps({"success": True, "url": proper_url})
                         else:
-                            # Already in correct format
+                            # Already in correct format (direct share URL)
                             return json.dumps({"success": True, "url": share_url})
                     else:
-                        error_msg = f"No shareUrl in result. Response: {data}"
+                        error_msg = f"No share URL found in result. Response: {data}"
                         print(error_msg)
                         return json.dumps({"success": False, "error": error_msg})
                 else:
@@ -455,12 +473,17 @@ async def process_question(ctx, question: str):
             "  - **Analyzing Results** / **Evaluating Search Results**\n"
             "  - **Reviewing Information** / **Assessing the Data**\n"
             "  - **Synthesizing Information** / **Preparing the Answer**\n"
-            "- For questions about current leaders: Search, read position page, read person's bio\n"
+            "- For questions about current leaders: Search, read position page, read person's bio (MUST do both!)\n"
+            "- NEVER stop after reading just the position page - also read the person's bio\n"
+            "- If you only read one page, your answer is incomplete - keep researching\n"
             "- Always gather comprehensive information before answering\n"
             "- Use **bold** for emphasis, never underscores\n"
             "- Do NOT add inline source citations\n"
-            "- Sources are added automatically\n"
-            "- Call functions directly - don't describe calling them\n\n"
+            "- Do NOT manually add a Sources section - it's added automatically\n"
+            "- Do NOT write or show any HTML code in your response - only provide the link\n"
+            "- When deploying HTML, your response should ONLY contain: [Click here to preview the HTML page](URL)\n"
+            "- URLs may expire after some time - this is normal\n"
+            "- For HTML deployment failures, suggest the user try again\n\n"
             
             "🔄 CONVERSATION CONTEXT:\n"
             "You have access to conversation history. Use it to:\n"
@@ -682,12 +705,42 @@ async def process_question(ctx, question: str):
                     is_leader_question = any(word in user_question for word in ["president", "prime minister", "leader", "pm"])
                     
                     if is_leader_question and len(sources_used) < 2 and iteration < 10:
-                        # Not enough research - nudge the model to get more info
+                        # Not enough research - FORCE the model to continue
                         messages.append({
                             "role": "system",
-                            "content": "For questions about current leaders, you should read both the position page AND the person's biographical page to provide comprehensive information. Continue researching."
+                            "content": "STOP! You have NOT read enough sources. For current leaders, you MUST read BOTH: 1) the position page (e.g., 'President of Sri Lanka') AND 2) the person's bio page (e.g., 'Anura Kumara Dissanayake'). You have only read " + str(len(sources_used)) + " source(s). Continue researching NOW."
                         })
                         continue
+                    elif is_leader_question and len(sources_used) < 2:
+                        # Not enough sources but at max iterations - keep researching anyway
+                        messages.append({
+                            "role": "system", 
+                            "content": "You still haven't read enough sources (only " + str(len(sources_used)) + "). Continue researching the leader's bio."
+                        })
+                        continue
+                    
+                    # Clean up AI-generated source citations and HTML code
+                    assistant_message = re.sub(
+                        r'📚\s*\*\*Sources\*\*.*?(?=\n\n|$)',
+                        '',
+                        assistant_message,
+                        flags=re.DOTALL
+                    ).strip()
+                    
+                    # Clean up HTML code blocks
+                    assistant_message = re.sub(
+                        r'```html.*?(?=\n\n|$)',
+                        '',
+                        assistant_message,
+                        flags=re.DOTALL | re.IGNORECASE
+                    ).strip()
+                    
+                    # Clean up any source-related phrases
+                    assistant_message = re.sub(
+                        r'\[Wikipedia\]\(https?://[^\)]+\)',
+                        '',
+                        assistant_message
+                    ).strip()
                     
                     # Clean up any leftover source citations in the text
                     assistant_message = re.sub(
