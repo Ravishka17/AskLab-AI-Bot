@@ -742,6 +742,22 @@ async def process_question(ctx, question: str):
                     
                     assistant_message = remove_thinking_tags(raw_content)
                     
+                    # DETECT STUCK IN SYNTHESIZING LOOP
+                    # If the model says it has synthesized information but doesn't provide an answer,
+                    # force it to actually answer the question
+                    if (iteration >= 4 and 
+                        final_thinking and 
+                        ("synthesiz" in final_thinking.lower() or "comprehensive" in final_thinking.lower() or "enough information" in final_thinking.lower()) and
+                        (not assistant_message or len(assistant_message.split()) < 10) and
+                        len(sources_used) >= 2):
+                        
+                        # Force the model to actually answer instead of just thinking
+                        messages.append({
+                            "role": "system",
+                            "content": "You have the information needed. Stop synthesizing and provide the complete answer to the user's question based on what you learned from Wikipedia. Only use information from the tools you called."
+                        })
+                        continue
+                    
                     # If final answer but no thinking was shown at all, this is problematic
                     if not thinking and not final_thinking and first_response:
                         # Force the model to think
@@ -907,9 +923,20 @@ async def process_question(ctx, question: str):
                 # Add tool results to messages
                 messages.extend(tool_results)
 
-            # Handle max iterations
-            if iteration >= max_iterations:
-                assistant_message = "I've researched extensively. Let me provide what I found:\n\n" + remove_thinking_tags(raw_content)
+            # Handle max iterations or excessive synthesizing loops
+            if iteration >= max_iterations or (iteration >= 8 and len(sources_used) >= 2):
+                # Force provide an answer even if the model keeps thinking without answering
+                assistant_message = "Based on my research, here is what I found:\n\n" + remove_thinking_tags(raw_content)
+                
+                # If still no substantive answer after max iterations, create a simple answer
+                if not assistant_message or len(assistant_message.split()) < 20:
+                    assistant_message = "I apologize, but I'm having trouble formulating the answer. I've gathered information from Wikipedia but need to process it differently. Let me try again:"
+                    # Trigger one more iteration to get a better answer
+                    messages.append({
+                        "role": "system", 
+                        "content": "You have researched sufficiently. Now provide a clear, direct answer based on what you learned from Wikipedia."
+                    })
+                    continue
 
             # Add sources if any were used
             if sources_used and assistant_message:
