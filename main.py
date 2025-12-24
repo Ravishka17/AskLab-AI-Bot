@@ -291,6 +291,37 @@ def remove_thinking_tags(text):
         return ""
     return re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
 
+
+def should_queue_thinking(thinking: str) -> bool:
+    """Check if thinking block references tool results and should be queued"""
+    if not thinking:
+        return False
+    
+    # Patterns indicating the thinking references tool results that haven't been shown yet
+    result_patterns = [
+        r'I (?:found|read|got|obtained|retrieved|saw|see|have|now have)',
+        r"Now (?:I have|we have)",
+        r"Now I have comprehensive",
+        r"Now I have information",
+        r"Now I've read",
+        r"I've (?:read|found|searched|researched)",
+        r'(?:Synthesizing|Reviewing|Analyzing) (?:the )?(?:Information|Results|Data)',
+        r'Based on (?:the )?(?:information|results|data|search|article)',
+        r'From (?:the )?(?:Wikipedia )?(?:page|article|search)',
+        r"I can provide",
+        r"I have (?:complete|comprehensive|enough|all)",
+        r'Let me provide',
+        r'I have enough information',
+        r"I now have",
+    ]
+    
+    thinking_lower = thinking.lower()
+    for pattern in result_patterns:
+        if re.search(pattern, thinking_lower, re.IGNORECASE):
+            return True
+    
+    return False
+
 def format_blockquote(text: str) -> str:
     """Format text as blockquote with clean structure"""
     if not text:
@@ -631,6 +662,9 @@ async def process_question(ctx, question: str):
             first_response = True
             thinking_only_responses = 0  # Track responses with only thinking, no action
 
+            # Queue thinking blocks that reference tool results
+            pending_thinking_blocks = []  # List of (thinking, tool_call_id) tuples
+
             while iteration < max_iterations:
                 iteration += 1
 
@@ -692,8 +726,14 @@ async def process_question(ctx, question: str):
                     
                     thinking_key = re.sub(r'\s+', ' ', thinking).strip().lower()[:100]
                     if thinking_key and thinking_key != last_thinking_key:
-                        await update_progress(f"🧠 **Thinking...**\n\n{format_blockquote(thinking)}")
-                        last_thinking_key = thinking_key
+                        # Check if thinking references tool results - if so, queue it for later
+                        if tool_calls and should_queue_thinking(thinking):
+                            # Queue this thinking block to display AFTER tool results
+                            pending_thinking_blocks.append((thinking, thinking_key))
+                        else:
+                            # Display thinking immediately (planning thoughts, not result synthesis)
+                            await update_progress(f"🧠 **Thinking...**\n\n{format_blockquote(thinking)}")
+                            last_thinking_key = thinking_key
                         consecutive_no_thinking = 0
                         first_response = False
                         
@@ -866,6 +906,13 @@ async def process_question(ctx, question: str):
                         "name": fname,
                         "content": str(tool_result)
                     })
+                
+                # Display any pending thinking blocks that were waiting for tool results
+                if pending_thinking_blocks:
+                    for thinking, thinking_key in pending_thinking_blocks:
+                        await update_progress(f"🧠 **Thinking...**\n\n{format_blockquote(thinking)}")
+                        last_thinking_key = thinking_key
+                    pending_thinking_blocks.clear()
 
                 # Add assistant message with tool calls to history (CLEAN VERSION - no thinking)
                 clean_content = remove_thinking_tags(raw_content)
