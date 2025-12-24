@@ -690,27 +690,15 @@ async def process_question(ctx, question: str):
                         })
                         continue
                     
-                    thinking_key = re.sub(r'\s+', ' ', thinking).strip().lower()[:100]
-                    if thinking_key and thinking_key != last_thinking_key:
-                        await update_progress(f"🧠 **Thinking...**\n\n{format_blockquote(thinking)}")
-                        last_thinking_key = thinking_key
-                        consecutive_no_thinking = 0
-                        first_response = False
-                        
-                        # If we have thinking but no tool calls and no answer, increment counter
-                        if not tool_calls and not remove_thinking_tags(raw_content).strip():
-                            thinking_only_responses += 1
-                            
-                            # If stuck in thinking loop (3+ times), force action
-                            if thinking_only_responses >= 3:
-                                messages.append({
-                                    "role": "system",
-                                    "content": "Stop overthinking. Either call the search_wikipedia function now, or provide your final answer based on what you know."
-                                })
-                                thinking_only_responses = 0
-                                continue
-                        else:
-                            thinking_only_responses = 0
+                    # Always show thinking when we have it (don't suppress duplicates)
+                    # Different stages may have similar thinking content but should all be displayed
+                    await update_progress(f"🧠 **Thinking...**\n\n{format_blockquote(thinking)}")
+                    last_thinking_key = None  # Reset to prevent duplicate suppression across iterations
+                    consecutive_no_thinking = 0
+                    first_response = False
+                    
+                    # Reset counter when we have actual thinking content
+                    thinking_only_responses = 0
                 else:
                     consecutive_no_thinking += 1
                     
@@ -722,13 +710,26 @@ async def process_question(ctx, question: str):
                         })
                         continue
                     
-                    # If model skips thinking multiple times during research, nudge it
+                    # If model skips thinking during research, nudge it
                     if consecutive_no_thinking >= 2 and tool_calls:
                         messages.append({
                             "role": "system",
                             "content": "Remember: You must include <think> blocks before and after using tools. Explain your reasoning."
                         })
                         consecutive_no_thinking = 0
+                
+                # This prevents being stuck in endless thinking loops
+                if not tool_calls and not thinking and iteration > 3:
+                    consecutive_no_thinking += 1
+                    
+                    # If stuck without tools or thinking for multiple iterations, force action
+                    if consecutive_no_thinking >= 3:
+                        messages.append({
+                            "role": "system",
+                            "content": "Stop overthinking. Either call the search_wikipedia function now, or provide your final answer based on what you know."
+                        })
+                        consecutive_no_thinking = 0
+                        continue
 
                 # If no tool calls, this is the final answer
                 if not tool_calls:
@@ -870,7 +871,23 @@ async def process_question(ctx, question: str):
                 # Add assistant message with tool calls to history (CLEAN VERSION - no thinking)
                 clean_content = remove_thinking_tags(raw_content)
                 if not clean_content:
-                    clean_content = "[Called tools]"
+                    # Provide descriptive message based on what tools are being called
+                    if tool_calls:
+                        tool_names = [tc.function.name for tc in tool_calls]
+                        if len(tool_names) == 1:
+                            tool_name = tool_names[0]
+                            if tool_name == "search_wikipedia":
+                                clean_content = "Searching Wikipedia for information."
+                            elif tool_name == "get_wikipedia_page":
+                                clean_content = "Reading Wikipedia article."
+                            elif tool_name == "deploy_html":
+                                clean_content = "Deploying HTML to public URL."
+                            else:
+                                clean_content = f"Calling {tool_name} tool."
+                        else:
+                            clean_content = f"Calling tools: {', '.join(tool_names)}."
+                    else:
+                        clean_content = "Processing request."
                     
                 messages.append({
                     "role": "assistant",
