@@ -928,15 +928,17 @@ async def process_question(ctx, question: str):
                 # Force provide an answer even if the model keeps thinking without answering
                 assistant_message = "Based on my research, here is what I found:\n\n" + remove_thinking_tags(raw_content)
                 
-                # If still no substantive answer after max iterations, create a simple answer
+                # If still no substantive answer after max iterations, provide a fallback
                 if not assistant_message or len(assistant_message.split()) < 20:
-                    assistant_message = "I apologize, but I'm having trouble formulating the answer. I've gathered information from Wikipedia but need to process it differently. Let me try again:"
-                    # Trigger one more iteration to get a better answer
-                    messages.append({
-                        "role": "system", 
-                        "content": "You have researched sufficiently. Now provide a clear, direct answer based on what you learned from Wikipedia."
-                    })
-                    continue
+                    if sources_used:
+                        # Build a simple answer from the sources we have
+                        fallback_answer = "I researched your question on Wikipedia. "
+                        if len(sources_used) >= 2:
+                            fallback_answer += "I read both the position page and the person's biography. "
+                        else:
+                            fallback_answer += f"I read about this topic on Wikipedia. \""
+                        fallback_answer += "Let me provide what information I was able to gather."
+                        assistant_message = fallback_answer
 
             # Add sources if any were used
             if sources_used and assistant_message:
