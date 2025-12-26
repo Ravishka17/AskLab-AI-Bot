@@ -680,10 +680,8 @@ async def process_question(ctx, question: str):
                 # Extract and display thinking
                 thinking = extract_thinking(raw_content)
                 if thinking:
-                    # Natural loop detection - don't suppress anything, let it flow
-                    # Just track that we're getting thinking content
-                    consecutive_no_thinking = 0
-                    first_response = False
+                    # Check if thinking has proper section headers
+                    has_headers = bool(re.search(r'\*\*[A-Z][^*]+\*\*', thinking))
                     
                     if not has_headers and iteration <= 3:
                         # Thinking lacks proper headers - enforce format
