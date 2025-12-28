@@ -415,9 +415,10 @@ async def process_question(ctx, question: str):
             "- After you have read ALL necessary Wikipedia sources\n"
             "- After you have gathered comprehensive information\n"
             "- DO NOT keep saying 'I can provide an answer' or 'Now I have information' - JUST PROVIDE IT\n"
-            "- Once you say 'Synthesizing the Information', that should be your LAST thinking block before the answer\n"
-            "- The pattern should be: Research → Synthesize → ANSWER. Not Research → Synthesize → More Synthesize → More Synthesize...\n"
-            "- If you find yourself saying 'I can now answer' or 'I have comprehensive information' more than once, you failed to provide the answer.\n\n"
+            "- Once you say 'Synthesizing the Information', that should be your LAST thinking block\n"
+            "- Immediately after your </think> closing tag, write the actual answer\n"
+            "- The pattern is: <think>...**Synthesizing the Information**...</think>WRITE ANSWER HERE\n"
+            "- DO NOT put MORE thinking after synthesizing - ANSWER IMMEDIATELY\n\n"
             
             "DO NOT use tools for:\n"
             "- Simple greetings (hi, hello, how are you)\n"
@@ -688,30 +689,11 @@ async def process_question(ctx, question: str):
                 # Extract and display thinking
                 thinking = extract_thinking(raw_content)
                 if thinking:
-                    # Check if thinking has proper section headers
-                    has_headers = bool(re.search(r'\*\*[A-Z][^*]+\*\*', thinking))
-                    
-                    if not has_headers and iteration <= 3:
-                        # Thinking lacks proper headers - enforce format
-                        messages.append({
-                            "role": "system",
-                            "content": "Your <think> blocks must include bold section headers like **Planning the Research** or **Understanding the Request**. Reformat your thinking."
-                        })
-                        continue
-                    
-                    # Always show thinking when we have it (don't suppress duplicates)
-                    # Different stages may have similar thinking content but should all be displayed
                     await update_progress(f"🧠 **Thinking...**\n\n{format_blockquote(thinking)}")
-                    last_thinking_key = None  # Reset to prevent duplicate suppression across iterations
                     consecutive_no_thinking = 0
                     first_response = False
-                    
-                    # Reset counter when we have actual thinking content
-                    thinking_only_responses = 0
                 else:
                     consecutive_no_thinking += 1
-                    
-                    # Let the model think naturally - don't send correction messages
 
                 # If no tool calls, this is the final answer
                 if not tool_calls:
