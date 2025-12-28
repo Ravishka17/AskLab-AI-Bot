@@ -727,7 +727,21 @@ async def process_question(ctx, question: str):
                     # Don't send correction messages - let the model complete naturally
                     # The system prompt will guide it to get 2+ sources for leaders
                     
-                    # Clean up AI-generated source citations and HTML code
+                    # Clean up AI-generated source citations, URLs, and duplicate sources
+                    assistant_message = re.sub(
+                        r'## Sources.*?(?=\n\n|$)',
+                        '',
+                        assistant_message,
+                        flags=re.DOTALL | re.IGNORECASE
+                    ).strip()
+                    
+                    assistant_message = re.sub(
+                        r'\[Wikipedia\]\(https?://[^\)]+\)',
+                        '',
+                        assistant_message,
+                        flags=re.IGNORECASE
+                    ).strip()
+                    
                     assistant_message = re.sub(
                         r'📚\s*\*\*Sources\*\*.*?(?=\n\n|$)',
                         '',
@@ -743,14 +757,14 @@ async def process_question(ctx, question: str):
                         flags=re.DOTALL | re.IGNORECASE
                     ).strip()
                     
-                    # Clean up any source-related phrases
+                    # Remove markdown links the AI might generate
                     assistant_message = re.sub(
-                        r'\[Wikipedia\]\(https?://[^\)]+\)',
-                        '',
+                        r'\[([^\]]+)\]\(https?://[^\)]+\)',  
+                        r'\1',
                         assistant_message
                     ).strip()
                     
-                    # Clean up any leftover source citations in the text
+                    # Clean up any leftover source citations
                     assistant_message = re.sub(
                         r'\*Source:.*?\*',
                         '',
@@ -758,17 +772,9 @@ async def process_question(ctx, question: str):
                         flags=re.IGNORECASE
                     ).strip()
                     
-                    # Clean up any tool call indicators that might have leaked
+                    # Remove any tool call leak patterns
                     assistant_message = re.sub(
-                        r'\[Calls? .+?\]',
-                        '',
-                        assistant_message,
-                        flags=re.IGNORECASE
-                    ).strip()
-                    
-                    # Clean up phrases about searching
-                    assistant_message = re.sub(
-                        r"I'?ll search.*?for .*?\.",
+                        r'\[Calls? .*?\]',
                         '',
                         assistant_message,
                         flags=re.IGNORECASE
