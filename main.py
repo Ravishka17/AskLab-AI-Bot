@@ -411,6 +411,14 @@ async def process_question(ctx, question: str):
             "- You do NOT have access to current information - you MUST retrieve it from Wikipedia\n"
             "- NEVER say 'From the Wikipedia page' or 'I can see that' before actually calling the tools\n\n"
             
+            "⏰ WHEN TO PROVIDE THE FINAL ANSWER:\n"
+            "- After you have read ALL necessary Wikipedia sources\n"
+            "- After you have gathered comprehensive information\n"
+            "- DO NOT keep saying 'I can provide an answer' or 'Now I have information' - JUST PROVIDE IT\n"
+            "- Once you say 'Synthesizing the Information', that should be your LAST thinking block before the answer\n"
+            "- The pattern should be: Research → Synthesize → ANSWER. Not Research → Synthesize → More Synthesize → More Synthesize...\n"
+            "- If you find yourself saying 'I can now answer' or 'I have comprehensive information' more than once, you failed to provide the answer.\n\n"
+            
             "DO NOT use tools for:\n"
             "- Simple greetings (hi, hello, how are you)\n"
             "- General knowledge from your training\n"
@@ -703,34 +711,7 @@ async def process_question(ctx, question: str):
                 else:
                     consecutive_no_thinking += 1
                     
-                    # If first response has no thinking, enforce it
-                    if first_response and iteration == 1:
-                        messages.append({
-                            "role": "system",
-                            "content": "You MUST start your response with <think>...</think> tags explaining your reasoning. Never skip this step."
-                        })
-                        continue
-                    
-                    # If model skips thinking during research, nudge it
-                    if consecutive_no_thinking >= 2 and tool_calls:
-                        messages.append({
-                            "role": "system",
-                            "content": "Remember: You must include <think> blocks before and after using tools. Explain your reasoning."
-                        })
-                        consecutive_no_thinking = 0
-                
-                # This prevents being stuck in endless thinking loops
-                if not tool_calls and not thinking and iteration > 3:
-                    consecutive_no_thinking += 1
-                    
-                    # If stuck without tools or thinking for multiple iterations, force action
-                    if consecutive_no_thinking >= 3:
-                        messages.append({
-                            "role": "system",
-                            "content": "Stop overthinking. Either call the search_wikipedia function now, or provide your final answer based on what you know."
-                        })
-                        consecutive_no_thinking = 0
-                        continue
+                    # Let the model think naturally - don't send correction messages
 
                 # If no tool calls, this is the final answer
                 if not tool_calls:
@@ -743,48 +724,8 @@ async def process_question(ctx, question: str):
                     
                     assistant_message = remove_thinking_tags(raw_content)
                     
-                    # Natural loop detection - when AI keeps thinking without answering
-                    if (iteration >= 4 and len(sources_used) >= 2 and 
-                        (not assistant_message or len(assistant_message.strip()) < 20)):
-                        
-                        synthesis_count = sum(1 for msg in messages[-6:] 
-                                            if msg.get("role") == "assistant" and 
-                                            "synthesizing" in (extract_thinking(msg.get("content", "")) or "").lower())
-                        
-                        if synthesis_count >= 2:
-                            messages.append({
-                                "role": "system", 
-                                "content": "You've indicated you have the information multiple times. Now provide the complete answer based on what you learned from the Wikipedia sources you read."
-                            })
-                            continue
-                    
-                    # If final answer but no thinking was shown at all, this is problematic
-                    if not thinking and not final_thinking and first_response:
-                        # Force the model to think
-                        messages.append({
-                            "role": "system",
-                            "content": "You must include <think>...</think> tags in your response. Start over with proper thinking."
-                        })
-                        continue
-                    
-                    # Check if we've done enough research for president/leader questions
-                    user_question = conversation_history[channel_id][-1]["content"].lower()
-                    is_leader_question = any(word in user_question for word in ["president", "prime minister", "leader", "pm"])
-                    
-                    if is_leader_question and len(sources_used) < 2 and iteration < 10:
-                        # Not enough research - FORCE the model to continue
-                        messages.append({
-                            "role": "system",
-                            "content": "STOP! You have NOT read enough sources. For current leaders, you MUST read BOTH: 1) the position page (e.g., 'President of Sri Lanka') AND 2) the person's bio page (e.g., 'Anura Kumara Dissanayake'). You have only read " + str(len(sources_used)) + " source(s). Continue researching NOW."
-                        })
-                        continue
-                    elif is_leader_question and len(sources_used) < 2:
-                        # Not enough sources but at max iterations - keep researching anyway
-                        messages.append({
-                            "role": "system", 
-                            "content": "You still haven't read enough sources (only " + str(len(sources_used)) + "). Continue researching the leader's bio."
-                        })
-                        continue
+                    # Don't send correction messages - let the model complete naturally
+                    # The system prompt will guide it to get 2+ sources for leaders
                     
                     # Clean up AI-generated source citations and HTML code
                     assistant_message = re.sub(
@@ -925,22 +866,9 @@ async def process_question(ctx, question: str):
                 # Add tool results to messages
                 messages.extend(tool_results)
 
-            # Handle max iterations or excessive synthesizing loops
-            if iteration >= max_iterations or (iteration >= 8 and len(sources_used) >= 2):
-                # Force provide an answer even if the model keeps thinking without answering
-                assistant_message = "Based on my research, here is what I found:\n\n" + remove_thinking_tags(raw_content)
-                
-                # If still no substantive answer after max iterations, provide a fallback
-                if not assistant_message or len(assistant_message.split()) < 20:
-                    if sources_used:
-                        # Build a simple answer from the sources we have
-                        fallback_answer = "I researched your question on Wikipedia. "
-                        if len(sources_used) >= 2:
-                            fallback_answer += "I read both the position page and the person's biography. "
-                        else:
-                            fallback_answer += f"I read about this topic on Wikipedia. \""
-                        fallback_answer += "Let me provide what information I was able to gather."
-                        assistant_message = fallback_answer
+            # At max iterations, just extract what we have
+            if iteration >= max_iterations:
+                assistant_message = remove_thinking_tags(raw_content)
 
             # Add sources if any were used
             if sources_used and assistant_message:
