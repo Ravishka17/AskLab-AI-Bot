@@ -278,18 +278,33 @@ async def execute_deploy_html(html_content):
         return json.dumps({"success": False, "error": str(e)})
 
 def extract_thinking(text):
+    """Extract thinking blocks from the response - supports both internal and external formats"""
     if not text:
         return None
-    pattern = r'<think>(.*?)</think>'
+
+    # Try internal thinking first (for AI decision making - not shown to users)
+    pattern = r'\[\[THINKING\]\](.*?)\[\[/THINKING\]\]'
     matches = re.findall(pattern, text, re.DOTALL | re.IGNORECASE)
     if matches:
         return matches[-1].strip()
+
+    # Fall back to external thinking (shown to users)
+    pattern = r'<thinking>(.*?)</thinking>'
+    matches = re.findall(pattern, text, re.DOTALL | re.IGNORECASE)
+    if matches:
+        return matches[-1].strip()
+
     return None
 
 def remove_thinking_tags(text):
+    """Remove ALL thinking tags from the response"""
     if not text:
         return ""
-    return re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+    # Remove internal thinking tags
+    text = re.sub(r'\[\[THINKING\]\].*?\[\[/THINKING\]\]', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+    # Remove external thinking tags
+    text = re.sub(r'<thinking>.*?</thinking>', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+    return text
 
 def format_blockquote(text: str) -> str:
     """Format text as blockquote with clean structure"""
@@ -687,6 +702,15 @@ async def process_question(ctx, question: str):
 
                 # Extract and display thinking
                 thinking = extract_thinking(raw_content)
+
+                # Also extract internal thinking separately (for AI decision-making)
+                internal_thinking = None
+                internal_pattern = r'\[\[THINKING\]\](.*?)\[\[/THINKING\]\]'
+                internal_matches = re.findall(internal_pattern, raw_content, re.DOTALL | re.IGNORECASE)
+                if internal_matches:
+                    internal_thinking = internal_matches[-1].strip()
+
+                # Display EXTERNAL thinking (shown to users) if present
                 if thinking:
                     # Check if thinking has proper section headers
                     has_headers = bool(re.search(r'\*\*[A-Z][^*]+\*\*', thinking))
@@ -721,6 +745,13 @@ async def process_question(ctx, question: str):
                         thinking_key = re.sub(r'\s+', ' ', final_thinking).strip().lower()[:100]
                         if thinking_key and thinking_key != last_thinking_key:
                             await update_progress(f"🧠 **Thinking...**\n\n{format_blockquote(final_thinking)}")
+
+                    # Also extract and display final internal thinking
+                    final_internal_pattern = r'\[\[THINKING\]\](.*?)\[\[/THINKING\]\]'
+                    final_internal_matches = re.findall(final_internal_pattern, raw_content, re.DOTALL | re.IGNORECASE)
+                    if final_internal_matches:
+                        final_internal = final_internal_matches[-1].strip()
+                        await update_progress(f"🤔 **Decision Making...**\n\n{format_blockquote(final_internal)}")
                     
                     assistant_message = remove_thinking_tags(raw_content)
                     
