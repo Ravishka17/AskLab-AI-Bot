@@ -391,10 +391,11 @@ async def process_question(ctx, question: str):
             "- Deploy HTML code to public URLs for users to preview\n"
             "- Think step-by-step using <think>...</think> tags\n\n"
             "⚠️ MANDATORY REQUIREMENT:\n"
-            "You MUST include <think>...</think> blocks in EVERY response. This is non-negotiable.\n"
-            "- For questions requiring research: Think BEFORE calling tools\n"
+            "You MUST include <think>...</think> blocks in your responses. This is non-negotiable.\n"
+            "- Think BEFORE calling tools to plan your research\n"
+            "- Think AFTER reading articles to analyze what you learned and plan next steps\n"
             "- For simple greetings: Think about how you'll respond\n"
-            "- Never respond without thinking first\n\n"
+            "- Never respond without thinking\n\n"
             
             "⚙️ WHEN TO USE WIKIPEDIA TOOLS:\n"
             "MANDATORY: You MUST use Wikipedia tools for:\n"
@@ -465,17 +466,20 @@ async def process_question(ctx, question: str):
             "**Planning My Approach**\n"
             "I need to search Wikipedia to get current information since my training is outdated.\n"
             "</think>\n\n"
-            "Then the system will call search_wikipedia with your query and show the results.\n\n"
+            "Then you see the search results.\n\n"
             "<think>\n"
             "**Evaluating Search Results**\n" 
             "I see search results. Now I need to read the actual Wikipedia pages to get details.\n"
             "</think>\n\n"
-            "Then the system will call get_wikipedia_page and show you the content.\n\n"
+            "Then you see the article content.\n\n"
             "<think>\n"
-            "**Analyzing Information**\n"
-            "I found the current president's name. To provide a complete answer, I should also read their bio page.\n"
+            "**Analyzing What I Learned**\n"
+            "I found out that the current president of Sri Lanka is Anura Kumara Dissanayake. I need to find more information about him to provide a complete answer.\n"
+            "**Planning the Next Step**\n"
+            "I'll search for 'Anura Kumara Dissanayake' on Wikipedia to read his bio page.\n"
             "</think>\n\n"
-            "Then the system calls get_wikipedia_page again for the bio.\n\n"
+            "Then the system calls search_wikipedia again for the bio.\n\n"
+            "Then you see the search result.\n\n"
             "<think>\n"
             "**Preparing the Answer**\n"
             "Now I have information from both pages and can provide a complete answer.\n"
@@ -865,6 +869,31 @@ async def process_question(ctx, question: str):
 
                 # Add tool results to messages
                 messages.extend(tool_results)
+
+                # After reading Wikipedia articles, prompt AI to think about what was learned
+                # This ensures the AI explicitly reasons about the content before next steps
+                last_tool_name = tool_results[-1].get("name", "") if tool_results else ""
+                if last_tool_name == "get_wikipedia_page":
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            "You just read a Wikipedia article. Now think about:\n"
+                            "1. What information did you learn from this article?\n"
+                            "2. Do you need to read more information to answer the user's question?\n"
+                            "3. If researching a current leader, have you read both their position page AND their bio page?\n\n"
+                            "Think step-by-step in a <think> block, then either call more tools or provide your answer."
+                        )
+                    })
+                elif last_tool_name == "search_wikipedia":
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            "You just received search results. Think about:\n"
+                            "1. Which result(s) should you read to answer the user's question?\n"
+                            "2. What's your next step - read a Wikipedia article?\n\n"
+                            "Think step-by-step in a <think> block, then call get_wikipedia_page or provide your answer."
+                        )
+                    })
 
             # At max iterations, just extract what we have
             if iteration >= max_iterations:
