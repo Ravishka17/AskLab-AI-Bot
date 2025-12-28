@@ -411,6 +411,14 @@ async def process_question(ctx, question: str):
             "- You do NOT have access to current information - you MUST retrieve it from Wikipedia\n"
             "- NEVER say 'From the Wikipedia page' or 'I can see that' before actually calling the tools\n\n"
             
+            "⏰ WHEN TO PROVIDE THE FINAL ANSWER:\n"
+            "- After you have read ALL necessary Wikipedia sources\n"
+            "- After you have gathered comprehensive information\n"
+            "- DO NOT keep saying 'I can provide an answer' or 'Now I have information' - JUST PROVIDE IT\n"
+            "- Once you say 'Synthesizing the Information', that should be your LAST thinking block before the answer\n"
+            "- The pattern should be: Research → Synthesize → ANSWER. Not Research → Synthesize → More Synthesize → More Synthesize...\n"
+            "- If you find yourself saying 'I can now answer' or 'I have comprehensive information' more than once, you failed to provide the answer.\n\n"
+            
             "DO NOT use tools for:\n"
             "- Simple greetings (hi, hello, how are you)\n"
             "- General knowledge from your training\n"
@@ -630,6 +638,7 @@ async def process_question(ctx, question: str):
             consecutive_no_thinking = 0
             first_response = True
             thinking_only_responses = 0  # Track responses with only thinking, no action
+            has_done_research = False  # Track if we've already searched/read Wikipedia
 
             while iteration < max_iterations:
                 iteration += 1
@@ -690,45 +699,19 @@ async def process_question(ctx, question: str):
                         })
                         continue
                     
-                    thinking_key = re.sub(r'\s+', ' ', thinking).strip().lower()[:100]
-                    if thinking_key and thinking_key != last_thinking_key:
-                        await update_progress(f"🧠 **Thinking...**\n\n{format_blockquote(thinking)}")
-                        last_thinking_key = thinking_key
-                        consecutive_no_thinking = 0
-                        first_response = False
-                        
-                        # If we have thinking but no tool calls and no answer, increment counter
-                        if not tool_calls and not remove_thinking_tags(raw_content).strip():
-                            thinking_only_responses += 1
-                            
-                            # If stuck in thinking loop (3+ times), force action
-                            if thinking_only_responses >= 3:
-                                messages.append({
-                                    "role": "system",
-                                    "content": "Stop overthinking. Either call the search_wikipedia function now, or provide your final answer based on what you know."
-                                })
-                                thinking_only_responses = 0
-                                continue
-                        else:
-                            thinking_only_responses = 0
+                    # Always show thinking when we have it (don't suppress duplicates)
+                    # Different stages may have similar thinking content but should all be displayed
+                    await update_progress(f"🧠 **Thinking...**\n\n{format_blockquote(thinking)}")
+                    last_thinking_key = None  # Reset to prevent duplicate suppression across iterations
+                    consecutive_no_thinking = 0
+                    first_response = False
+                    
+                    # Reset counter when we have actual thinking content
+                    thinking_only_responses = 0
                 else:
                     consecutive_no_thinking += 1
                     
-                    # If first response has no thinking, enforce it
-                    if first_response and iteration == 1:
-                        messages.append({
-                            "role": "system",
-                            "content": "You MUST start your response with <think>...</think> tags explaining your reasoning. Never skip this step."
-                        })
-                        continue
-                    
-                    # If model skips thinking multiple times during research, nudge it
-                    if consecutive_no_thinking >= 2 and tool_calls:
-                        messages.append({
-                            "role": "system",
-                            "content": "Remember: You must include <think> blocks before and after using tools. Explain your reasoning."
-                        })
-                        consecutive_no_thinking = 0
+                    # Let the model think naturally - don't send correction messages
 
                 # If no tool calls, this is the final answer
                 if not tool_calls:
@@ -741,33 +724,8 @@ async def process_question(ctx, question: str):
                     
                     assistant_message = remove_thinking_tags(raw_content)
                     
-                    # If final answer but no thinking was shown at all, this is problematic
-                    if not thinking and not final_thinking and first_response:
-                        # Force the model to think
-                        messages.append({
-                            "role": "system",
-                            "content": "You must include <think>...</think> tags in your response. Start over with proper thinking."
-                        })
-                        continue
-                    
-                    # Check if we've done enough research for president/leader questions
-                    user_question = conversation_history[channel_id][-1]["content"].lower()
-                    is_leader_question = any(word in user_question for word in ["president", "prime minister", "leader", "pm"])
-                    
-                    if is_leader_question and len(sources_used) < 2 and iteration < 10:
-                        # Not enough research - FORCE the model to continue
-                        messages.append({
-                            "role": "system",
-                            "content": "STOP! You have NOT read enough sources. For current leaders, you MUST read BOTH: 1) the position page (e.g., 'President of Sri Lanka') AND 2) the person's bio page (e.g., 'Anura Kumara Dissanayake'). You have only read " + str(len(sources_used)) + " source(s). Continue researching NOW."
-                        })
-                        continue
-                    elif is_leader_question and len(sources_used) < 2:
-                        # Not enough sources but at max iterations - keep researching anyway
-                        messages.append({
-                            "role": "system", 
-                            "content": "You still haven't read enough sources (only " + str(len(sources_used)) + "). Continue researching the leader's bio."
-                        })
-                        continue
+                    # Don't send correction messages - let the model complete naturally
+                    # The system prompt will guide it to get 2+ sources for leaders
                     
                     # Clean up AI-generated source citations and HTML code
                     assistant_message = re.sub(
@@ -844,11 +802,13 @@ async def process_question(ctx, question: str):
                         query = fargs.get('query', '')
                         await update_progress(f"🔍 **Searching Wikipedia...**\n\n> {query}")
                         tool_result = await execute_wiki_search(query)
+                        has_done_research = True
 
                     elif fname == "get_wikipedia_page":
                         title = fargs.get('title', '')
                         await update_progress(f"📖 **Reading Article...**\n\n> {title}")
                         tool_result = await execute_wiki_page(title)
+                        has_done_research = True
                         
                         # Track source
                         wiki_url = f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}"
@@ -870,7 +830,23 @@ async def process_question(ctx, question: str):
                 # Add assistant message with tool calls to history (CLEAN VERSION - no thinking)
                 clean_content = remove_thinking_tags(raw_content)
                 if not clean_content:
-                    clean_content = "[Called tools]"
+                    # Provide descriptive message based on what tools are being called
+                    if tool_calls:
+                        tool_names = [tc.function.name for tc in tool_calls]
+                        if len(tool_names) == 1:
+                            tool_name = tool_names[0]
+                            if tool_name == "search_wikipedia":
+                                clean_content = "Searching Wikipedia for information."
+                            elif tool_name == "get_wikipedia_page":
+                                clean_content = "Reading Wikipedia article."
+                            elif tool_name == "deploy_html":
+                                clean_content = "Deploying HTML to public URL."
+                            else:
+                                clean_content = f"Calling {tool_name} tool."
+                        else:
+                            clean_content = f"Calling tools: {', '.join(tool_names)}."
+                    else:
+                        clean_content = "Processing request."
                     
                 messages.append({
                     "role": "assistant",
@@ -890,9 +866,9 @@ async def process_question(ctx, question: str):
                 # Add tool results to messages
                 messages.extend(tool_results)
 
-            # Handle max iterations
+            # At max iterations, just extract what we have
             if iteration >= max_iterations:
-                assistant_message = "I've researched extensively. Let me provide what I found:\n\n" + remove_thinking_tags(raw_content)
+                assistant_message = remove_thinking_tags(raw_content)
 
             # Add sources if any were used
             if sources_used and assistant_message:
