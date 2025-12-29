@@ -49,6 +49,7 @@ groq_client = Groq(api_key=GROQ_API_KEY)
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
+bot.debug_mode = os.getenv('DEBUG_MODE', 'false').lower() == 'true'
 
 conversation_history = {}
 
@@ -216,7 +217,8 @@ def remove_thinking_tags(text):
     """Remove thinking tags from text"""
     if not text:
         return ""
-    return re.sub(r'<think>.*?</think>', '', text, re.DOTALL | re.IGNORECASE).strip()
+    # Fix: Use proper parameters for re.sub - flags as keyword argument
+    return re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
 
 def format_blockquote(text: str) -> str:
     """Format text as blockquote with clean structure"""
@@ -707,10 +709,18 @@ async def process_question(ctx, question: str):
                     
                     assistant_message = remove_thinking_tags(raw_content)
                     
+                    # DEBUGGING: Log raw content and post-thinking removal length
+                    if bot.debug_mode:
+                        print(f"DEBUG: Raw content length: {len(raw_content if raw_content else '')}")
+                        print(f"DEBUG: After removing thinking tags, length: {len(assistant_message if assistant_message else '')}")
+                        if not assistant_message:
+                            print(f"DEBUG: Raw content: {repr(raw_content[:500] if raw_content else 'None')}")
+                    
                     # Don't send correction messages - let the model complete naturally
                     # The system prompt will guide it to get 2+ sources for leaders
                     
                     # Clean up AI-generated source citations and HTML code
+                    before_cleanup = assistant_message
                     assistant_message = re.sub(
                         r'📚\s*\*\*Sources\*\*.*?(?=\n\n|$)',
                         '',
@@ -718,7 +728,12 @@ async def process_question(ctx, question: str):
                         flags=re.DOTALL
                     ).strip()
                     
+                    # DEBUG: Log if this changed anything
+                    if bot.debug_mode and before_cleanup != assistant_message:
+                        print(f"DEBUG: After Sources cleanup: {len(assistant_message)} chars (removed {len(before_cleanup) - len(assistant_message)})")
+                    
                     # Clean up HTML code blocks
+                    before_cleanup = assistant_message
                     assistant_message = re.sub(
                         r'```html.*?(?=\n\n|$)',
                         '',
@@ -726,14 +741,22 @@ async def process_question(ctx, question: str):
                         flags=re.DOTALL | re.IGNORECASE
                     ).strip()
                     
+                    if bot.debug_mode and before_cleanup != assistant_message:
+                        print(f"DEBUG: After HTML cleanup: {len(assistant_message)} chars (removed {len(before_cleanup) - len(assistant_message)})")
+                    
                     # Clean up any source-related phrases
+                    before_cleanup = assistant_message
                     assistant_message = re.sub(
                         r'\[Wikipedia\]\(https?://[^\)]+\)',
                         '',
                         assistant_message
                     ).strip()
                     
+                    if bot.debug_mode and before_cleanup != assistant_message:
+                        print(f"DEBUG: After Wikipedia link cleanup: {len(assistant_message)} chars (removed {len(before_cleanup) - len(assistant_message)})")
+                    
                     # Clean up any leftover source citations in the text
+                    before_cleanup = assistant_message
                     assistant_message = re.sub(
                         r'\*Source:.*?\*',
                         '',
@@ -741,7 +764,11 @@ async def process_question(ctx, question: str):
                         flags=re.IGNORECASE
                     ).strip()
                     
+                    if bot.debug_mode and before_cleanup != assistant_message:
+                        print(f"DEBUG: After Source citation cleanup: {len(assistant_message)} chars (removed {len(before_cleanup) - len(assistant_message)})")
+                    
                     # Clean up any tool call indicators that might have leaked
+                    before_cleanup = assistant_message
                     assistant_message = re.sub(
                         r'\[Calls? .+?\]',
                         '',
@@ -749,13 +776,25 @@ async def process_question(ctx, question: str):
                         flags=re.IGNORECASE
                     ).strip()
                     
-                    # Clean up phrases about searching
+                    if bot.debug_mode and before_cleanup != assistant_message:
+                        print(f"DEBUG: After tool call cleanup: {len(assistant_message)} chars (removed {len(before_cleanup) - len(assistant_message)})")
+                    
+                    # Clean up phrases about searching - FIXED: Only match at line start
+                    before_cleanup = assistant_message
                     assistant_message = re.sub(
-                        r"I'?ll search.*?for .*?\.",
+                        r"(?:^|\n\n)I'?ll search.*?for .*?\.",
                         '',
                         assistant_message,
                         flags=re.IGNORECASE
                     ).strip()
+                    
+                    if bot.debug_mode and before_cleanup != assistant_message:
+                        print(f"DEBUG: After search phrase cleanup: {len(assistant_message)} chars (removed {len(before_cleanup) - len(assistant_message)})")
+                    
+                    # Fall back to raw content if cleaning removed everything
+                    if not assistant_message and raw_content:
+                        print(f"WARNING: All content was cleaned! Using raw content with thinking tags removed")
+                        assistant_message = remove_thinking_tags(raw_content)
                     
                     # Remove any remaining empty lines
                     while '\n\n\n' in assistant_message:
@@ -904,12 +943,31 @@ async def process_question(ctx, question: str):
             if assistant_message:
                 final_text = assistant_message.strip()
                 
+                # DEBUG: Log final message info
+                if bot.debug_mode:
+                    print(f"DEBUG: Final message length: {len(final_text)}")
+                    if len(final_text) < 100:
+                        print(f"DEBUG: Final message content: {repr(final_text)}")
+                
                 # Send answer as a regular message (not in embed)
                 while final_text:
                     await ctx.send(final_text[:1990])
                     final_text = final_text[1990:]
             else:
+                # ENHANCED ERROR LOGGING
+                error_details = ""
+                if raw_content:
+                    error_details = f" Raw content available ({len(raw_content)} chars)."
+                    print(f"ERROR: Empty response generated. Raw content preview: {repr(raw_content[:200])}")
+                else:
+                    print(f"ERROR: Empty response generated. No raw content available.")
+                
                 await ctx.send("I couldn't generate a response. Please try again.")
+                
+                # Detailed diagnostic logging
+                print(f"DIAGNOSTIC: Iteration count: {iteration}")
+                print(f"DIAGNOSTIC: Sources used: {len(sources_used)}")
+                print(f"DIAGNOSTIC: Has done research: {has_done_research}")
 
     except Exception as e:
         error_text = f"❌ **Error:** {str(e)}"
