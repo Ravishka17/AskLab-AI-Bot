@@ -20,11 +20,15 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 RAG_AVAILABLE = False
+RAG_STORE = None
 try:
     from asklab_ai_bot.rag_examples import get_rag_store, initialize_rag
+    RAG_STORE = initialize_rag()
     RAG_AVAILABLE = True
+    print("✓ RAG examples module loaded successfully")
 except ImportError as e:
-    print(f"Warning: RAG examples module not available ({e})")
+    print(f"Info: RAG examples module not available ({e})")
+    print("  Bot will continue without RAG-based few-shot examples")
 
 # Load environment variables
 load_dotenv()
@@ -573,15 +577,15 @@ async def process_question(ctx, question: str):
 
     # Add RAG-based few-shot examples to system message
     pages_read_tracker = []  # Track Wikipedia pages read for research completeness
-    if RAG_AVAILABLE:
+    if RAG_AVAILABLE and RAG_STORE is not None:
         try:
-            rag_store = get_rag_store()
-            rag_additions = rag_store.get_system_prompt_additions(question)
+            rag_additions = RAG_STORE.get_system_prompt_additions(question)
             if rag_additions:
                 system_message["content"] += rag_additions
                 print(f"📚 Added RAG examples for: {question[:50]}...")
         except Exception as e:
             print(f"Warning: Failed to retrieve RAG examples: {e}")
+            RAG_AVAILABLE = False  # Disable RAG for future requests if there's an error
 
     progress_msg = None
     overflow_msg = None
@@ -846,12 +850,11 @@ async def process_question(ctx, question: str):
                             sources_used.append(wiki_url)
                         
                         # Track page title for RAG validation
-                        if 'pages_read_tracker' in locals() and RAG_AVAILABLE:
+                        if 'pages_read_tracker' in locals() and RAG_AVAILABLE and RAG_STORE is not None:
                             pages_read_tracker.append(title)
                             # Validate research completeness
                             try:
-                                rag_store = get_rag_store()
-                                completeness = rag_store.check_research_completeness(question, pages_read_tracker)
+                                completeness = RAG_STORE.check_research_completeness(question, pages_read_tracker)
                                 if not completeness['complete']:
                                     # Add a system prompt to remind the AI
                                     messages.append({

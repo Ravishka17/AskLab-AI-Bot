@@ -5,6 +5,7 @@ Provides retrieval of reasoning patterns and examples based on query context.
 
 import json
 import os
+import sys
 from typing import Dict, List, Optional, Any
 from pathlib import Path
 
@@ -18,9 +19,27 @@ class RAGExampleStore:
     def __init__(self, examples_file: str = None):
         """Initialize the RAG example store."""
         if examples_file is None:
-            # Default to data/rag_examples.json in the project root
-            base_dir = Path(__file__).parent.parent
-            examples_file = base_dir / "data" / "rag_examples.json"
+            # Try to find rag_examples.json in multiple locations
+            # Priority: 1) environment variable, 2) project root/data/, 3) package directory
+            env_path = os.getenv('RAG_EXAMPLES_PATH')
+            if env_path:
+                examples_file = Path(env_path)
+            else:
+                # Look for data/rag_examples.json in the project root
+                # Check multiple possible locations
+                possible_paths = [
+                    Path.cwd() / "data" / "rag_examples.json",  # Project root (when running locally)
+                    Path(__file__).parent.parent / "data" / "rag_examples.json",  # Package relative
+                    Path("/home/container/data/rag_examples.json"),  # fps.ms container path
+                    Path("/home/container/rag_examples.json"),  # Alternative container path
+                ]
+                for path in possible_paths:
+                    if path.exists():
+                        examples_file = path
+                        break
+                else:
+                    # Fallback to package-relative path even if file doesn't exist
+                    examples_file = Path(__file__).parent.parent / "data" / "rag_examples.json"
         else:
             examples_file = Path(examples_file)
         
