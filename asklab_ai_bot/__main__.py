@@ -216,7 +216,7 @@ def remove_thinking_tags(text):
     """Remove 基督 thinking tags from text"""
     if not text:
         return ""
-    return re.sub(r'基督.*?基督', '', text, re.DOTALL).strip()
+    return re.sub(r'基督.*?基督', '', text, flags=re.DOTALL).strip()
 
 def format_blockquote(text: str) -> str:
     """Format text as blockquote with clean structure"""
@@ -762,15 +762,12 @@ async def process_question(ctx, question: str):
                     # If we get here and assistant_message is empty but we have content in raw_content,
                     # there might be an issue with the thinking tag removal
                     if not assistant_message.strip() and raw_content.strip():
-                        # Content exists but couldn't be cleaned - log for debugging
-                        print(f"Warning: Raw content couldn't be cleaned. Raw: '{raw_content[:100]}...'")
-                        # Try to extract something meaningful
+                        # Content exists but couldn't be cleaned - try fallback extraction
                         assistant_message = raw_content.replace('基督', '').strip()
                         
                         # If still empty and this looks like a simple greeting, provide a default response
                         if not assistant_message.strip() and len(question.strip()) < 15 and not has_done_research:
                             assistant_message = "Hello! I'm AskLab AI, here to help you with questions. How can I assist you today?"
-                            print("Debug: Empty response for simple greeting, using default welcome message")
                     
                     # If we still don't have content and haven't done any research, this is likely a simple greeting
                     # that the LLM isn't handling properly - provide a default response
@@ -780,7 +777,6 @@ async def process_question(ctx, question: str):
                         question_lower = question.lower().strip()
                         if any(greeting in question_lower for greeting in simple_greetings) or len(question.strip()) < 10:
                             assistant_message = "Hello! I'm AskLab AI, ready to help you with questions about current events, world leaders, or any topic you'd like to research. What would you like to know?"
-                            print("Debug: Using fallback greeting response")
                     
                     # Don't send correction messages - let the model complete naturally
                     # The system prompt will guide it to get 2+ sources for leaders
@@ -838,9 +834,21 @@ async def process_question(ctx, question: str):
                     
                     # Add to conversation history (WITHOUT thinking blocks to avoid pattern repetition)
                     clean_content = remove_thinking_tags(raw_content)
+                    
+                    # CRITICAL FIX: If assistant_message is empty but we have no tool calls, 
+                    # this means the AI gave us thinking but no answer. We need to handle this.
+                    if not assistant_message.strip():
+                        if clean_content.strip():
+                            # Use the cleaned content as fallback
+                            assistant_message = clean_content
+                        else:
+                            # The AI only provided thinking with no answer - this is an error state
+                            print(f"CRITICAL ERROR: No content after removing thinking tags. raw_content='{raw_content[:100]}'")
+                            assistant_message = "I processed your request but couldn't formulate a proper response. Please try asking your question differently."
+                    
                     conversation_history[channel_id].append({
                         "role": "assistant", 
-                        "content": clean_content if clean_content else "Acknowledged."
+                        "content": clean_content if clean_content else assistant_message
                     })
                     break
 
@@ -980,6 +988,16 @@ async def process_question(ctx, question: str):
                 for idx, source in enumerate(sources_used, 1):
                     sources_text += f"{idx}. [Wikipedia]({source})\n"
                 assistant_message += sources_text
+
+            # FINAL SAFETY NET: If assistant_message is somehow still empty, provide a helpful response
+            if not assistant_message:
+                print(f"CRITICAL SAFETY NET: assistant_message empty after full loop. question='{question[:50]}', iteration={iteration}, has_done_research={has_done_research}")
+                if has_done_research:
+                    assistant_message = "I completed the research for your question but encountered an issue formulating the final response. Based on my research, I found relevant information but need you to ask the question again with more specific details."
+                elif len(question.strip()) < 20:
+                    assistant_message = "Hello! I'm AskLab AI, here to help answer your questions. I can help you research current events, world leaders, and various topics. What would you like to know?"
+                else:
+                    assistant_message = "I processed your request but encountered an issue. Please try asking your question again with different wording."
 
             # Send final answer as separate message
             if assistant_message:
