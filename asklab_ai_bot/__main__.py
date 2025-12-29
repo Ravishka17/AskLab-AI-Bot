@@ -213,10 +213,10 @@ def extract_thinking(text):
     return None
 
 def remove_thinking_tags(text):
-    """Remove thinking tags from text"""
+    """Remove 基督 thinking tags from text"""
     if not text:
         return ""
-    return re.sub(r'<think>.*?</think>', '', text, re.DOTALL | re.IGNORECASE).strip()
+    return re.sub(r'基督.*?基督', '', text, re.DOTALL).strip()
 
 def format_blockquote(text: str) -> str:
     """Format text as blockquote with clean structure"""
@@ -535,6 +535,9 @@ async def process_question(ctx, question: str):
         except Exception as e:
             print(f"Warning: Failed to retrieve RAG examples: {e}")
             RAG_AVAILABLE = False  # Disable RAG for future requests if there's an error
+    elif len(question.strip()) < 10 and not any(word in question.lower() for word in ['president', 'prime minister', 'current', 'who', 'what', 'when', 'where', 'how']):
+        # For very short greetings/questions, skip RAG to avoid over-complicating simple responses
+        print(f"Skipping RAG for short greeting: {question[:20]}...")
 
     progress_msg = None
     overflow_msg = None
@@ -694,10 +697,14 @@ async def process_question(ctx, question: str):
                 thinking = extract_thinking(raw_content)
                 if thinking:
                     # Check if thinking has proper section headers
-                    has_headers = bool(re.search(r'\*\*[A-Z][^*]+\*\*', thinking))
+                    has_headers = bool(re.search(r'\*\*[A-Za-z][^*]+\*\*', thinking))
                     
-                    if not has_headers and iteration <= 3:
-                        # Thinking lacks proper headers - enforce format
+                    # Only enforce headers for research-heavy questions, not simple greetings
+                    is_simple_greeting = len(question.strip()) < 20 and not any(word in question.lower() for word in ['president', 'prime minister', 'current', 'search', 'find', 'who', 'what', 'when', 'where', 'how', 'why'])
+                    
+                    if not has_headers and iteration <= 3 and not is_simple_greeting:
+                        # Thinking lacks proper headers - enforce format for complex queries
+                        print(f"Warning: Thinking without headers on iteration {iteration}. Prompting for reformatted thinking.")
                         messages.append({
                             "role": "system",
                             "content": "Your 基督 blocks must include bold section headers like **Planning the Research** or **Understanding the Request**. Reformat your thinking."
@@ -724,6 +731,10 @@ async def process_question(ctx, question: str):
                     # the AI might be struggling to formulate the response
                     if is_waiting_final_answer and consecutive_no_thinking >= 2 and has_done_research:
                         await update_progress("⚠️ Phase 5: Finalizing response (this may take a moment)...")
+                    
+                    # Debug: log when no thinking is found
+                    if not tool_calls and iteration <= 2 and not is_simple_greeting:
+                        print(f"Debug: No thinking found in iteration {iteration}. Raw content length: {len(raw_content)}, raw: '{raw_content[:100]}'")
 
                 # If no tool calls, this is the final answer
                 if not tool_calls:
@@ -732,9 +743,21 @@ async def process_question(ctx, question: str):
                     if final_thinking:
                         thinking_key = re.sub(r'\s+', ' ', final_thinking).strip().lower()[:100]
                         if thinking_key and thinking_key != last_thinking_key:
-                            await update_progress(f"🧠 **Thinking...**\n\n{format_blockquote(final_thinking)}")
+                            await update_progress(f"🧠 **Finalizing response...**\n\n{format_blockquote(final_thinking)}")
                     
                     assistant_message = remove_thinking_tags(raw_content)
+                    
+                    # Check if we got thinking but no actual answer content - this is a critical error
+                    if final_thinking and not assistant_message.strip():
+                        # AI provided thinking but no answer - this is a problem
+                        print(f"Warning: AI provided only thinking, no answer content. Thinking: {final_thinking[:50]}...")
+                        
+                        # Re-prompt the AI to provide an actual answer
+                        messages.append({
+                            "role": "system",
+                            "content": "You provided thinking but no actual answer. Please provide your answer OUTSIDE the 基督 tags. The format should be:\n\n基督\n[your thinking here]\n基督\n\n[your answer here]"
+                        })
+                        continue
                     
                     # If we get here and assistant_message is empty but we have content in raw_content,
                     # there might be an issue with the thinking tag removal
@@ -743,6 +766,21 @@ async def process_question(ctx, question: str):
                         print(f"Warning: Raw content couldn't be cleaned. Raw: '{raw_content[:100]}...'")
                         # Try to extract something meaningful
                         assistant_message = raw_content.replace('基督', '').strip()
+                        
+                        # If still empty and this looks like a simple greeting, provide a default response
+                        if not assistant_message.strip() and len(question.strip()) < 15 and not has_done_research:
+                            assistant_message = "Hello! I'm AskLab AI, here to help you with questions. How can I assist you today?"
+                            print("Debug: Empty response for simple greeting, using default welcome message")
+                    
+                    # If we still don't have content and haven't done any research, this is likely a simple greeting
+                    # that the LLM isn't handling properly - provide a default response
+                    if not assistant_message.strip() and not has_done_research and iteration > 1:
+                        # This is likely a simple greeting that doesn't require research
+                        simple_greetings = ["hi", "hello", "hey", "good morning", "good afternoon", "good evening"]
+                        question_lower = question.lower().strip()
+                        if any(greeting in question_lower for greeting in simple_greetings) or len(question.strip()) < 10:
+                            assistant_message = "Hello! I'm AskLab AI, ready to help you with questions about current events, world leaders, or any topic you'd like to research. What would you like to know?"
+                            print("Debug: Using fallback greeting response")
                     
                     # Don't send correction messages - let the model complete naturally
                     # The system prompt will guide it to get 2+ sources for leaders
@@ -929,6 +967,12 @@ async def process_question(ctx, question: str):
             # At max iterations, just extract what we have
             if iteration >= max_iterations:
                 assistant_message = remove_thinking_tags(raw_content)
+                if not assistant_message.strip() and last_good_content:
+                    # We've reached max iterations but have some good content stored
+                    assistant_message = f"I researched your question but needed more time to complete the answer. Based on what I found:\n\n{last_good_content}\n\nPlease try asking again with a more specific question."
+                elif not assistant_message.strip():
+                    # No content at all after max iterations
+                    assistant_message = "I couldn't complete the research within the time limit. Please try asking a more specific question."
 
             # Add sources if any were used
             if sources_used and assistant_message:
@@ -946,7 +990,21 @@ async def process_question(ctx, question: str):
                     await ctx.send(final_text[:1990])
                     final_text = final_text[1990:]
             else:
-                await ctx.send("I couldn't generate a response. Please try again.")
+                # We should never hit this - it means assistant_message was empty or None
+                error_details = []
+                if assistant_message is None:
+                    error_details.append("no response content returned")
+                if iteration >= max_iterations:
+                    error_details.append("reached maximum iterations")
+                if not has_done_research and len(question.strip()) < 10:
+                    error_details.append("simple greeting may need rephrasing")
+                
+                error_msg = "I couldn't generate a response. Please try again."
+                if error_details:
+                    error_msg = f"I couldn't generate a response ({', '.join(error_details)}). Please try rephrasing your question."
+                
+                await ctx.send(error_msg)
+                print(f"Error: Empty response after {iteration} iterations. Debug info: assistant_message={assistant_message is not None}, has_done_research={has_done_research}, question_length={len(question.strip())}")
 
     except Exception as e:
         error_text = f"❌ **Error:** {str(e)}"
