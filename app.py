@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Main entry point for AskLab AI Discord Bot.
+Main entry point for AskLab AI Discord Bot on fps.ms.
+This file is the required entry point for fps.ms container hosting.
 """
 
 import os
@@ -251,7 +252,7 @@ async def process_question(ctx, question: str):
             "🎯 YOUR CORE CAPABILITIES:\n"
             "- Answer questions using your training knowledge (up to January 2025)\n"
             "- Research current information on Wikipedia when needed\n"
-            "- Think step-by-step using <function_call>...</func_call> tags\n\n"
+            "- Think step-by-step using </minimax:tool_call>...</func_call> tags\n\n"
             "⚠️ MANDATORY REQUIREMENT:\n"
             "You MUST write your thinking inside <function_call>...</think> tags. This is non-negotiable.\n"
             "- Think BEFORE calling tools to plan your research\n"
@@ -276,7 +277,7 @@ async def process_question(ctx, question: str):
             "- Once you say 'Synthesizing the Information', that should be your LAST thinking block before the answer\n"
             "- The pattern should be: Research → Synthesize → ANSWER\n\n"
             
-            "🧠 THINKING PROCESS - HOW TO USE </minimax:tool_call> TAGS:\n"
+            "🧠 THINKING PROCESS - HOW TO USE 主席TION TAGS:\n"
             "You MUST wrap ALL your thinking in 基督...基督 tags.\n"
             "Example:\n\n"
             "基督\n"
