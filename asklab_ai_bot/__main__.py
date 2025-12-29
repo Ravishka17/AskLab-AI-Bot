@@ -203,11 +203,11 @@ async def execute_deploy_html(value: str) -> str:
 # --- HELPER FUNCTIONS ---
 
 def extract_thinking(text):
-    """Extract content between <function_call> tags"""
+    """Extract content between 基督 tags"""
     if not text:
         return None
-    pattern = r'<function_call>([^<]+)</func_call>'
-    matches = re.findall(pattern, text, re.DOTALL | re.IGNORECASE)
+    pattern = r'基督(.*?)基督'
+    matches = re.findall(pattern, text, re.DOTALL)
     if matches:
         return matches[-1].strip()
     return None
@@ -622,9 +622,17 @@ async def process_question(ctx, question: str):
             first_response = True
             thinking_only_responses = 0  # Track responses with only thinking, no action
             has_done_research = False  # Track if we've already searched/read Wikipedia
+            is_waiting_final_answer = False  # Track if we're expecting a final answer
+            successful_research_done = False  # Track if we successfully completed research
+            last_good_content = None  # Store last valid response to recover from failures
 
             while iteration < max_iterations:
                 iteration += 1
+
+                # If we've done successful research and the last response had only thinking without tools,
+                # we're probably waiting for a final answer
+                if has_done_research and consecutive_no_thinking > 0:
+                    is_waiting_final_answer = True
 
                 # Make API call
                 try:
@@ -636,11 +644,13 @@ async def process_question(ctx, question: str):
                         temperature=GROQ_TEMPERATURE,
                         max_tokens=2000
                     )
+                    # Store the raw response for debugging
+                    last_good_response = response
                 except Exception as api_error:
                     print(f"API Error on iteration {iteration}: {api_error}")
                     if iteration <= 2:
                         # Retry on first two attempts
-                        await update_progress("⚠️ Retrying...")
+                        await update_progress("⚠️ Retrying after API error...")
                         import asyncio
                         await asyncio.sleep(1)
                         try:
@@ -658,9 +668,21 @@ async def process_question(ctx, question: str):
                                 # On first iteration failure, give up and show error
                                 raise api_error
                             else:
-                                # Later iterations, continue with fallback
-                                assistant_message = "I encountered an issue while researching. Please try asking your question again."
+                                # Later iterations, try to use last good content or provide helpful message
+                                if last_good_content:
+                                    assistant_message = last_good_content
+                                else:
+                                    assistant_message = "I encountered an issue while researching. Please try asking your question again."
                                 break
+                    elif has_done_research and successful_research_done:
+                        # We've done research successfully but hit an error on final answer
+                        # Try to provide a fallback answer about what we found
+                        await update_progress("⚠️ Encountered an issue. Providing best available information...")
+                        if last_good_content:
+                            assistant_message = f"I successfully researched your question but encountered an issue while finalizing the answer. Based on what I found:\n\n{last_good_content}\n\nPlease try asking again if you need more details."
+                        else:
+                            assistant_message = "I completed the research but encountered an issue generating the final answer. Please try asking the question again with a simpler phrasing."
+                        break
                     else:
                         raise api_error
 
@@ -691,10 +713,17 @@ async def process_question(ctx, question: str):
                     
                     # Reset counter when we have actual thinking content
                     thinking_only_responses = 0
+                    
+                    # Store thinking content as potential fallback
+                    if thinking and is_waiting_final_answer:
+                        last_good_content = f"Based on my research: {thinking}"
                 else:
                     consecutive_no_thinking += 1
                     
-                    # Let the model think naturally - don't send correction messages
+                    # If we've been waiting for a final answer and consistently get no thinking/content, 
+                    # the AI might be struggling to formulate the response
+                    if is_waiting_final_answer and consecutive_no_thinking >= 2 and has_done_research:
+                        await update_progress("⚠️ Phase 5: Finalizing response (this may take a moment)...")
 
                 # If no tool calls, this is the final answer
                 if not tool_calls:
@@ -706,6 +735,14 @@ async def process_question(ctx, question: str):
                             await update_progress(f"🧠 **Thinking...**\n\n{format_blockquote(final_thinking)}")
                     
                     assistant_message = remove_thinking_tags(raw_content)
+                    
+                    # If we get here and assistant_message is empty but we have content in raw_content,
+                    # there might be an issue with the thinking tag removal
+                    if not assistant_message.strip() and raw_content.strip():
+                        # Content exists but couldn't be cleaned - log for debugging
+                        print(f"Warning: Raw content couldn't be cleaned. Raw: '{raw_content[:100]}...'")
+                        # Try to extract something meaningful
+                        assistant_message = raw_content.replace('基督', '').strip()
                     
                     # Don't send correction messages - let the model complete naturally
                     # The system prompt will guide it to get 2+ sources for leaders
