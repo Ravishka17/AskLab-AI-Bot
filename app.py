@@ -2,8 +2,6 @@
 """
 Main entry point for AskLab AI Discord Bot on fps.ms.
 This file is the required entry point for fps.ms container hosting.
-
-IMPORTANT: fps.ms requires this file to be named 'app.py'
 """
 
 import os
@@ -24,7 +22,6 @@ try:
     print("✓ RAG examples module loaded successfully")
 except ImportError as e:
     print(f"Info: RAG examples module not available ({e})")
-    print("  Bot will continue without RAG-based few-shot examples")
 
 # Import bot modules
 import json
@@ -101,8 +98,17 @@ TOOLS = [
 async def execute_wiki_search(query: str) -> str:
     """Execute Wikipedia search using the official API"""
     url = "https://en.wikipedia.org/w/api.php"
-    params = {"action": "query", "list": "search", "srsearch": query, "format": "json", "utf8": True, "limit": 10}
-    headers = {"User-Agent": "AskLab-AI-Bot/1.0"}
+    params = {
+        "action": "query",
+        "list": "search",
+        "srsearch": query,
+        "format": "json",
+        "utf8": True,
+        "limit": 10
+    }
+    headers = {
+        "User-Agent": "AskLab-AI-Bot/1.0 (Discord Bot)"
+    }
     
     try:
         async with aiohttp.ClientSession() as session:
@@ -122,8 +128,18 @@ async def execute_wiki_search(query: str) -> str:
 async def execute_wiki_page(title: str) -> str:
     """Execute Wikipedia page read using the official API"""
     url = "https://en.wikipedia.org/w/api.php"
-    params = {"action": "query", "prop": "extracts", "explaintext": True, "titles": title, "format": "json", "utf8": True, "redirects": True}
-    headers = {"User-Agent": "AskLab-AI-Bot/1.0"}
+    params = {
+        "action": "query",
+        "prop": "extracts",
+        "explaintext": True,
+        "titles": title,
+        "format": "json",
+        "utf8": True,
+        "redirects": True
+    }
+    headers = {
+        "User-Agent": "AskLab-AI-Bot/1.0 (Discord Bot)"
+    }
     
     try:
         async with aiohttp.ClientSession() as session:
@@ -134,7 +150,9 @@ async def execute_wiki_page(title: str) -> str:
                     for page_id, page_content in pages.items():
                         if page_id != '-1':
                             extract = page_content.get('extract', '')
-                            return extract[:3000] + "... (truncated)" if len(extract) > 3000 else (extract or "No content available.")
+                            if len(extract) > 3000:
+                                return extract[:3000] + "... (truncated)"
+                            return extract if extract else "No content available."
                     return "Page not found."
                 return f"Error: Wikipedia API returned status {response.status}"
     except Exception as e:
@@ -157,22 +175,27 @@ async def execute_deploy_html(value: str) -> str:
 # --- HELPER FUNCTIONS ---
 
 def extract_thinking(text):
+    """Extract content between <function_call> tags ONLY"""
     if not text:
         return None
-    pattern = r'<function_call>([^<]+)</func_call>'
+    pattern = r'</minimax:tool_call>([^<]+)</func_call>'
     matches = re.findall(pattern, text, re.DOTALL | re.IGNORECASE)
     return matches[-1].strip() if matches else None
 
 def remove_thinking_tags(text):
+    """Remove thinking tags from text"""
     if not text:
         return ""
-    return re.sub(r'<think>.*?</think>', '', text, re.DOTALL | re.IGNORECASE).strip()
+    return re.sub(r'被告.*?被告', '', text, re.DOTALL | re.IGNORECASE).strip()
 
 def format_blockquote(text: str) -> str:
+    """Format text as blockquote with clean structure"""
     if not text:
         return ""
+    
     lines = text.strip().splitlines()
     formatted = []
+    
     for line in lines:
         line = line.strip()
         if not line:
@@ -183,6 +206,7 @@ def format_blockquote(text: str) -> str:
             formatted.append(f"> {line}")
         else:
             formatted.append(f"> {line}")
+    
     return "\n".join(formatted)
 
 
@@ -212,9 +236,12 @@ async def on_message(message):
 
 async def process_question(ctx, question: str):
     channel_id = ctx.channel.id
+    
     if channel_id not in conversation_history:
         conversation_history[channel_id] = []
+    
     conversation_history[channel_id].append({"role": "user", "content": question})
+    
     if len(conversation_history[channel_id]) > 20:
         conversation_history[channel_id] = conversation_history[channel_id][-20:]
 
@@ -226,12 +253,12 @@ async def process_question(ctx, question: str):
             "- Answer questions using your training knowledge (up to January 2025)\n"
             "- Research current information on Wikipedia when needed\n"
             "- Deploy HTML code to public URLs for users to preview\n"
-            "- Think step-by-step using <think>...</think> tags\n\n"
+            "- Think step-by-step using <function_call>...</func_call> tags\n\n"
             "⚠️ MANDATORY REQUIREMENT:\n"
-            "You MUST include <think>...</think> blocks in your responses.\n"
+            "You MUST write your thinking inside <function_call>...</think> tags. This is non-negotiable.\n"
             "- Think BEFORE calling tools to plan your research\n"
             "- Think AFTER reading articles to analyze what you learned and plan next steps\n"
-            "- Never respond without thinking\n\n"
+            "- Never respond without thinking in <function_call> tags\n\n"
             
             "⚙️ WHEN TO USE WIKIPEDIA TOOLS:\n"
             "MANDATORY: You MUST use Wikipedia tools for:\n"
@@ -251,74 +278,79 @@ async def process_question(ctx, question: str):
             "- Once you say 'Synthesizing the Information', that should be your LAST thinking block before the answer\n"
             "- The pattern should be: Research → Synthesize → ANSWER\n\n"
             
-            "🧠 THINKING PROCESS:\n"
-            "You MUST structure ALL thinking blocks with bold section headers. Format example:\n\n"
-            "<think>\n"
+            "🧠 THINKING PROCESS - HOW TO USE <function_call> TAGS:\n"
+            "You MUST wrap ALL your thinking in <function_call>...</think> tags.\n"
+            "Example:\n\n"
+            "<function_call>\n"
             "**Understanding the Request**\n"
-            "Brief explanation of what the user wants.\n"
+            "The user wants to know who is the current president of Sri Lanka.\n"
             "**Planning My Approach**\n"
-            "What I'll do to address this.\n"
-            "</think>\n\n"
+            "I need to search Wikipedia to get current information.\n"
+            "</func_call>\n\n"
+            "🔍 **Searching Wikipedia...**\n\n"
+            "> current president of Sri Lanka\n\n"
+            "Then you see the search results.\n\n"
+            "You MUST include <function_call> tags around your thinking - NOT as plain text!\n\n"
             
             "For research questions about current world leaders:\n\n"
-            "<think>\n"
+            "<function_call>\n"
             "**Understanding the Request**\n"
             "User wants to know who is currently serving as president of Sri Lanka.\n"
             "**Planning My Approach**\n"
             "Since my training data has a cutoff date, I need to search Wikipedia to get the latest information.\n"
-            "</think>\n\n"
+            "</func_call>\n\n"
             "🔍 **Searching Wikipedia...**\n\n"
             "> current president of Sri Lanka\n\n"
             "Then you see the search results.\n\n"
-            "<think>\n"
+            "<minimax:tool_call>\n"
             "**Analyzing the Results**\n"
             "I see search results that include 'President of Sri Lanka' which should have current information.\n"
             "**Planning the Next Step**\n"
             "I'll call get_wikipedia_page to read the 'President of Sri Lanka' article.\n"
-            "</think>\n\n"
+            "</func_call>\n\n"
             "📖 **Reading Article...**\n\n"
             "> President of Sri Lanka\n\n"
             "Then you see the article content.\n\n"
-            "<think>\n"
+            "<minimax:tool_call>\n"
             "**Analyzing What I Learned**\n"
             "I found out that the current president of Sri Lanka is Anura Kumara Dissanayake.\n"
             "**Planning the Next Step**\n"
             "I'll search for 'Anura Kumara Dissanayake' on Wikipedia to read his bio page.\n"
-            "</think>\n\n"
+            "</func_call>\n\n"
             "🔍 **Searching Wikipedia...**\n\n"
             "> Anura Kumara Dissanayake\n\n"
             "Then you see the search result.\n\n"
-            "<think>\n"
+            "</minimax:tool_call>\n"
             "**Analyzing the Results**\n"
             "I found the 'Anura Kumara Dissanayake' article.\n"
             "**Planning the Next Step**\n"
             "Let me read this article to find more information about him.\n"
-            "</think>\n\n"
+            "</func_call>\n\n"
             "📖 **Reading Article...**\n\n"
             "> Anura Kumara Dissanayake\n\n"
             "Then you see the article content.\n\n"
-            "<think>\n"
+            "</minimax:tool_call>\n"
             "**Synthesizing the Information**\n"
             "I've found comprehensive information about the current president of Sri Lanka from both Wikipedia pages.\n"
             "**Preparing the Answer**\n"
             "Now I can provide a complete answer.\n"
-            "</think>\n\n"
+            "</func_call>\n\n"
             "The current president of Sri Lanka is Anura Kumara Dissanayake (commonly known as AKD), who assumed office on September 23, 2024, after winning the 2024 presidential election.\n\n"
             "[Sources automatically added by system]\n\n"
             
             "⚠️ CRITICAL RULES:\n"
-            "- MANDATORY: Every <think> block MUST have bold section headers\n"
+            "- MANDATORY: Every thinking block MUST be wrapped in <function_call>...</think> tags\n"
             "- MANDATORY: Think BEFORE calling your first function\n"
             "- For questions about current leaders: Search, read position page, read person's bio (MUST do both!)\n"
             "- NEVER stop after reading just the position page - also read the person's bio\n"
             "- If you only read one page, your answer is incomplete - keep researching\n"
             "- Always gather comprehensive information before answering\n"
-            "- Use **bold** for emphasis, never underscores\n"
+            "- Use **bold** for section headers inside thinking blocks\n"
             "- Do NOT manually add a Sources section - it's added automatically\n"
             "- When deploying HTML, your response should ONLY contain: [Click here to preview the HTML page](URL)\n"
             "- If you see tool results, you successfully called them. If not, you FAILED to call them.\n\n"
             
-            "Remember: Think in <think> tags, then either call functions OR provide your answer!"
+            "Remember: Think in <function_call> tags, then either call functions OR provide your answer!"
         )
     }
 
@@ -344,7 +376,11 @@ async def process_question(ctx, question: str):
             assistant_message = ""
             progress_entries: List[str] = []
             
-            reasoning_embed = discord.Embed(title="Reasoning", description="🤔 **Processing...**", color=0x5865F2)
+            reasoning_embed = discord.Embed(
+                title="Reasoning",
+                description="🤔 **Processing...**",
+                color=0x5865F2
+            )
             progress_msg = await ctx.send(embed=reasoning_embed)
 
             async def update_progress(entry: str) -> None:
@@ -401,68 +437,127 @@ async def process_question(ctx, question: str):
                 raw_content = response_msg.content or ""
                 tool_calls = response_msg.tool_calls or []
 
+                # Extract and display thinking ONLY from <function_call> tags
                 thinking = extract_thinking(raw_content)
                 if thinking:
                     has_headers = bool(re.search(r'\*\*[A-Z][^*]+\*\*', thinking))
                     if not has_headers and iteration <= 3:
-                        messages.append({"role": "system", "content": "Your <think> blocks must include bold section headers. Reformat your thinking."})
+                        messages.append({
+                            "role": "system",
+                            "content": "Your thinking blocks must include bold section headers like **Planning the Research**. Also, you MUST wrap your thinking in <function_call>...</think> tags. Reformat your thinking."
+                        })
                         continue
                     await update_progress(f"🧠 **Thinking...**\n\n{format_blockquote(thinking)}")
                 else:
-                    pass
+                    # No thinking in <function_call> tags - this is a problem
+                    if iteration <= 2:
+                        messages.append({
+                            "role": "system",
+                            "content": "You MUST wrap your thinking in <think>...</think> tags. Write your reasoning inside these tags before calling any tools. Do NOT write thinking as plain text."
+                        })
+                        continue
 
                 if not tool_calls:
+                    # No tool calls - this is the final answer
                     final_thinking = extract_thinking(raw_content)
                     if final_thinking:
                         await update_progress(f"🧠 **Thinking...**\n\n{format_blockquote(final_thinking)}")
+                    
                     assistant_message = remove_thinking_tags(raw_content)
                     
                     # Clean up AI-generated content
-                    assistant_message = re.sub(r'📚\s*\*\*Sources\*\*.*?(?=\n\n|$)', '', assistant_message, flags=re.DOTALL).strip()
-                    assistant_message = re.sub(r'```html.*?(?=\n\n|$)', '', assistant_message, flags=re.DOTALL | re.IGNORECASE).strip()
-                    assistant_message = re.sub(r'\[Wikipedia\]\(https?://[^\)]+\)', '', assistant_message).strip()
-                    assistant_message = re.sub(r'\*Source:.*?\*', '', assistant_message, flags=re.IGNORECASE).strip()
-                    assistant_message = re.sub(r'\[Calls? .+?\]', '', assistant_message, flags=re.IGNORECASE).strip()
+                    assistant_message = re.sub(
+                        r'📚\s*\*\*Sources\*\*.*?(?=\n\n|$)',
+                        '',
+                        assistant_message,
+                        flags=re.DOTALL
+                    ).strip()
+                    assistant_message = re.sub(
+                        r'```html.*?(?=\n\n|$)',
+                        '',
+                        assistant_message,
+                        flags=re.DOTALL | re.IGNORECASE
+                    ).strip()
+                    assistant_message = re.sub(
+                        r'\[Wikipedia\]\(https?://[^\)]+\)',
+                        '',
+                        assistant_message
+                    ).strip()
+                    assistant_message = re.sub(
+                        r'\*Source:.*?\*',
+                        '',
+                        assistant_message,
+                        flags=re.IGNORECASE
+                    ).strip()
+                    assistant_message = re.sub(
+                        r'\[Calls? .+?\]',
+                        '',
+                        assistant_message,
+                        flags=re.IGNORECASE
+                    ).strip()
                     while '\n\n\n' in assistant_message:
                         assistant_message = assistant_message.replace('\n\n\n', '\n\n')
                     
                     clean_content = remove_thinking_tags(raw_content)
-                    conversation_history[channel_id].append({"role": "assistant", "content": clean_content if clean_content else "Acknowledged."})
+                    conversation_history[channel_id].append({
+                        "role": "assistant", 
+                        "content": clean_content if clean_content else "Acknowledged."
+                    })
                     break
 
+                # Process tool calls
                 tool_results = []
+                
                 for tool_call in tool_calls:
                     fname = tool_call.function.name
                     try:
                         fargs = json.loads(tool_call.function.arguments)
                     except:
                         fargs = {}
+
                     tool_result = ""
+                    
                     if fname == "search_wikipedia":
                         query = fargs.get('query', '')
                         await update_progress(f"🔍 **Searching Wikipedia...**\n\n> {query}")
                         tool_result = await execute_wiki_search(query)
+
                     elif fname == "get_wikipedia_page":
                         title = fargs.get('title', '')
                         await update_progress(f"📖 **Reading Article...**\n\n> {title}")
                         tool_result = await execute_wiki_page(title)
+                        
+                        # Track source
                         wiki_url = f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}"
                         if wiki_url not in sources_used:
                             sources_used.append(wiki_url)
+                        
+                        # Track page title for RAG validation
                         if 'pages_read_tracker' in locals() and RAG_AVAILABLE and RAG_STORE is not None:
                             pages_read_tracker.append(title)
                             try:
                                 completeness = RAG_STORE.check_research_completeness(question, pages_read_tracker)
                                 if not completeness['complete']:
-                                    messages.append({"role": "system", "content": f"⚠️ Research Incomplete: {completeness['reason']}"})
+                                    messages.append({
+                                        "role": "system",
+                                        "content": f"⚠️ Research Incomplete: {completeness['reason']}"
+                                    })
                             except:
                                 pass
+
                     elif fname == "deploy_html":
                         html_value = fargs.get('value', '')
                         await update_progress(f"🌐 **Deploying HTML...**")
                         tool_result = await execute_deploy_html(html_value)
-                    tool_results.append({"tool_call_id": tool_call.id, "role": "tool", "name": fname, "content": str(tool_result)})
 
+                    tool_results.append({
+                        "tool_call_id": tool_call.id,
+                        "role": "tool",
+                        "name": fname,
+                        "content": str(tool_result)
+                    })
+
+                # Add assistant message with tool calls to history
                 clean_content = remove_thinking_tags(raw_content)
                 if not clean_content:
                     if tool_calls:
@@ -481,39 +576,86 @@ async def process_question(ctx, question: str):
                             clean_content = f"Calling tools: {', '.join(tool_names)}."
                     else:
                         clean_content = "Processing request."
-                messages.append({"role": "assistant", "content": clean_content, "tool_calls": [{"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}} for tc in tool_calls]})
+                    
+                messages.append({
+                    "role": "assistant",
+                    "content": clean_content,
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments
+                            }
+                        } for tc in tool_calls
+                    ]
+                })
+
+                # Add tool results to messages
                 messages.extend(tool_results)
 
                 # After reading Wikipedia articles, prompt AI to think about what was learned
                 last_tool_name = tool_results[-1].get("name", "") if tool_results else ""
                 if last_tool_name == "get_wikipedia_page":
-                    messages.append({"role": "system", "content": "You just read a Wikipedia article. Now think about:\n1. What information did you learn from this article?\n2. Do you need to read more information?\n3. If researching a current leader, have you read both their position page AND their bio page?\n\nThink step-by-step in a 基督 block, then either call more tools or provide your answer."})
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            "You just read a Wikipedia article. Now think about:\n"
+                            "1. What information did you learn from this article?\n"
+                            "2. Do you need to read more information to answer the user's question?\n"
+                            "3. If researching a current leader, have you read both their position page AND their bio page?\n\n"
+                            "Think step-by-step in a <function_call> block, then either call more tools or provide your answer."
+                        )
+                    })
                 elif last_tool_name == "search_wikipedia":
-                    messages.append({"role": "system", "content": "You just received search results. Think about:\n1. Which result(s) should you read?\n2. What's your next step?\n\nThink step-by-step in a 基督 block, then call get_wikipedia_page or provide your answer."})
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            "You just received search results. Think about:\n"
+                            "1. Which result(s) should you read to answer the user's question?\n"
+                            "2. What's your next step - read a Wikipedia article?\n\n"
+                            "Think step-by-step in a <function_call> block, then call get_wikipedia_page or provide your answer."
+                        )
+                    })
 
+            # At max iterations, just extract what we have
+            if iteration >= max_iterations:
+                assistant_message = remove_thinking_tags(raw_content)
+
+            # Add sources if any were used
             if sources_used and assistant_message:
                 sources_text = "\n\n📚 **Sources**\n"
                 for idx, source in enumerate(sources_used, 1):
                     sources_text += f"{idx}. [Wikipedia]({source})\n"
                 assistant_message += sources_text
 
+            # Send final answer as separate message
             if assistant_message:
                 final_text = assistant_message.strip()
+                
+                # Send answer as a regular message (not in embed)
                 while final_text:
                     await ctx.send(final_text[:1990])
                     final_text = final_text[1990:]
             else:
                 await ctx.send("I couldn't generate a response. Please try again.")
+
     except Exception as e:
         error_text = f"❌ **Error:** {str(e)}"
         try:
             if progress_msg:
-                error_embed = discord.Embed(title="Reasoning", description=error_text[:4096], color=0xED4245)
+                error_embed = discord.Embed(
+                    title="Reasoning",
+                    description=error_text[:4096],
+                    color=0xED4245
+                )
                 await progress_msg.edit(embed=error_embed)
             else:
                 await ctx.send(error_text)
         except:
             pass
+        
         print(f"Error: {e}")
         import traceback
         traceback.print_exc()
