@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import sys
 import json
 import re
 import uuid
@@ -13,12 +14,17 @@ from groq import Groq
 from dotenv import load_dotenv
 
 # Import RAG examples module for few-shot prompting
+# Add the project root to sys.path to ensure asklab_ai_bot package is found
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+RAG_AVAILABLE = False
 try:
     from asklab_ai_bot.rag_examples import get_rag_store, initialize_rag
     RAG_AVAILABLE = True
-except ImportError:
-    RAG_AVAILABLE = False
-    print("Warning: RAG examples module not available")
+except ImportError as e:
+    print(f"Warning: RAG examples module not available ({e})")
 
 # Load environment variables
 load_dotenv()
