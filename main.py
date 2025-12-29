@@ -12,6 +12,14 @@ from discord.ext import commands
 from groq import Groq
 from dotenv import load_dotenv
 
+# Import RAG examples module for few-shot prompting
+try:
+    from asklab_ai_bot.rag_examples import get_rag_store, initialize_rag
+    RAG_AVAILABLE = True
+except ImportError:
+    RAG_AVAILABLE = False
+    print("Warning: RAG examples module not available")
+
 # Load environment variables
 load_dotenv()
 
@@ -554,8 +562,20 @@ async def process_question(ctx, question: str):
             "- Provide coherent responses\n\n"
             
             "Remember: Think in <think> tags, then either call functions OR provide your answer!"
-        )
-    }
+            )
+            }
+
+    # Add RAG-based few-shot examples to system message
+    pages_read_tracker = []  # Track Wikipedia pages read for research completeness
+    if RAG_AVAILABLE:
+        try:
+            rag_store = get_rag_store()
+            rag_additions = rag_store.get_system_prompt_additions(question)
+            if rag_additions:
+                system_message["content"] += rag_additions
+                print(f"📚 Added RAG examples for: {question[:50]}...")
+        except Exception as e:
+            print(f"Warning: Failed to retrieve RAG examples: {e}")
 
     progress_msg = None
     overflow_msg = None
@@ -818,6 +838,22 @@ async def process_question(ctx, question: str):
                         wiki_url = f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}"
                         if wiki_url not in sources_used:
                             sources_used.append(wiki_url)
+                        
+                        # Track page title for RAG validation
+                        if 'pages_read_tracker' in locals() and RAG_AVAILABLE:
+                            pages_read_tracker.append(title)
+                            # Validate research completeness
+                            try:
+                                rag_store = get_rag_store()
+                                completeness = rag_store.check_research_completeness(question, pages_read_tracker)
+                                if not completeness['complete']:
+                                    # Add a system prompt to remind the AI
+                                    messages.append({
+                                        "role": "system",
+                                        "content": f"⚠️ Research Incomplete: {completeness['reason']}"
+                                    })
+                            except:
+                                pass
 
                     elif fname == "deploy_html":
                         html_value = fargs.get('value', '')
