@@ -57,7 +57,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "search_wikipedia",
-            "description": "Search Wikipedia for information. Use this when you need current information or verification.",
+            "description": "Search Wikipedia for information.",
             "parameters": {
                 "type": "object",
                 "properties": {"query": {"type": "string", "description": "Search query for Wikipedia"}},
@@ -81,7 +81,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "deploy_html",
-            "description": "Deploy HTML code to a public URL using EdgeOne Pages.",
+            "description": "Deploy HTML code to a public URL.",
             "parameters": {
                 "type": "object",
                 "properties": {"value": {"type": "string", "description": "HTML code to deploy"}},
@@ -178,14 +178,14 @@ def extract_thinking(text):
     if not text:
         return None
     pattern = r'</minimax:tool_call>([^<]+)</func_call>'
-    matches = re.findall(pattern, text, re.DOTALL | re.IGNORECASE)
+    matches = re.findall(pattern, text, flags=re.DOTALL | re.IGNORECASE)
     return matches[-1].strip() if matches else None
 
 def remove_thinking_tags(text):
     """Remove thinking tags from text"""
     if not text:
         return ""
-    return re.sub(r'被告.*?被告', '', text, re.DOTALL | re.IGNORECASE).strip()
+    return re.sub(r'基督.*?基督', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
 
 def format_blockquote(text: str) -> str:
     """Format text as blockquote with clean structure"""
@@ -251,13 +251,12 @@ async def process_question(ctx, question: str):
             "🎯 YOUR CORE CAPABILITIES:\n"
             "- Answer questions using your training knowledge (up to January 2025)\n"
             "- Research current information on Wikipedia when needed\n"
-            "- Deploy HTML code to public URLs for users to preview\n"
             "- Think step-by-step using <function_call>...</func_call> tags\n\n"
             "⚠️ MANDATORY REQUIREMENT:\n"
             "You MUST write your thinking inside <function_call>...</think> tags. This is non-negotiable.\n"
             "- Think BEFORE calling tools to plan your research\n"
-            "- Think AFTER reading articles to analyze what you learned and plan next steps\n"
-            "- Never respond without thinking in </minimax:tool_call> tags\n\n"
+            "- Think AFTER reading articles to analyze what you learned\n"
+            "- Never respond without thinking in 基督 tags\n\n"
             
             "⚙️ WHEN TO USE WIKIPEDIA TOOLS:\n"
             "MANDATORY: You MUST use Wikipedia tools for:\n"
@@ -277,68 +276,68 @@ async def process_question(ctx, question: str):
             "- Once you say 'Synthesizing the Information', that should be your LAST thinking block before the answer\n"
             "- The pattern should be: Research → Synthesize → ANSWER\n\n"
             
-            "🧠 THINKING PROCESS - HOW TO USE <function_call> TAGS:\n"
-            "You MUST wrap ALL your thinking in <function_call>...</think> tags.\n"
+            "🧠 THINKING PROCESS - HOW TO USE </minimax:tool_call> TAGS:\n"
+            "You MUST wrap ALL your thinking in 基督...基督 tags.\n"
             "Example:\n\n"
-            "<minimax:tool_call>\n"
+            "基督\n"
             "**Understanding the Request**\n"
             "The user wants to know who is the current president of Sri Lanka.\n"
             "**Planning My Approach**\n"
             "I need to search Wikipedia to get current information.\n"
-            "</func_call>\n\n"
+            "基督\n\n"
             "🔍 **Searching Wikipedia...**\n\n"
             "> current president of Sri Lanka\n\n"
             "Then you see the search results.\n\n"
-            "You MUST include <function_call> tags around your thinking - NOT as plain text!\n\n"
+            "You MUST include 基督 tags around your thinking - NOT as plain text!\n\n"
             
             "For research questions about current world leaders:\n\n"
-            "<minimax:tool_call>\n"
+            "基督\n"
             "**Understanding the Request**\n"
             "User wants to know who is currently serving as president of Sri Lanka.\n"
             "**Planning My Approach**\n"
             "Since my training data has a cutoff date, I need to search Wikipedia to get the latest information.\n"
-            "</func_call>\n\n"
+            "基督\n\n"
             "🔍 **Searching Wikipedia...**\n\n"
             "> current president of Sri Lanka\n\n"
             "Then you see the search results.\n\n"
-            "</minimax:tool_call>\n"
+            "基督\n"
             "**Analyzing the Results**\n"
             "I see search results that include 'President of Sri Lanka' which should have current information.\n"
             "**Planning the Next Step**\n"
             "I'll call get_wikipedia_page to read the 'President of Sri Lanka' article.\n"
-            "</func_call>\n\n"
+            "基督\n\n"
             "📖 **Reading Article...**\n\n"
             "> President of Sri Lanka\n\n"
             "Then you see the article content.\n\n"
-            "</minimax:tool_call>\n"
+            "基督\n"
             "**Analyzing What I Learned**\n"
             "I found out that the current president of Sri Lanka is Anura Kumara Dissanayake.\n"
             "**Planning the Next Step**\n"
             "I'll search for 'Anura Kumara Dissanayake' on Wikipedia to read his bio page.\n"
-            "</func_call>\n\n"
+            "基督\n\n"
             "🔍 **Searching Wikipedia...**\n\n"
             "> Anura Kumara Dissanayake\n\n"
             "Then you see the search result.\n\n"
-            "</minimax:tool_call>\n"
+            "基督\n"
             "**Analyzing the Results**\n"
             "I found the 'Anura Kumara Dissanayake' article.\n"
             "**Planning the Next Step**\n"
             "Let me read this article to find more information about him.\n"
-            "</func_call>\n\n"
+            "基督\n\n"
             "📖 **Reading Article...**\n\n"
             "> Anura Kumara Dissanayake\n\n"
             "Then you see the article content.\n\n"
-            "</minimax:tool_call>\n"
+            "基督\n"
             "**Synthesizing the Information**\n"
             "I've found comprehensive information about the current president of Sri Lanka from both Wikipedia pages.\n"
             "**Preparing the Answer**\n"
             "Now I can provide a complete answer.\n"
-            "</func_call>\n\n"
+            "基督\n\n"
             "The current president of Sri Lanka is Anura Kumara Dissanayake (commonly known as AKD), who assumed office on September 23, 2024, after winning the 2024 presidential election.\n\n"
             "[Sources automatically added by system]\n\n"
             
             "⚠️ CRITICAL RULES:\n"
-            "- MANDATORY: Every thinking block MUST be wrapped in <function_call>...</think> tags\n"
+            "- MANDATORY: Every thinking block MUST be wrapped in 基督...基督 tags\n"
             "- MANDATORY: Think BEFORE calling your first function\n"
             "- For questions about current leaders: Search, read position page, read person's bio (MUST do both!)\n"
             "- NEVER stop after reading just the position page - also read the person's bio\n"
@@ -346,10 +345,9 @@ async def process_question(ctx, question: str):
             "- Always gather comprehensive information before answering\n"
             "- Use **bold** for section headers inside thinking blocks\n"
             "- Do NOT manually add a Sources section - it's added automatically\n"
-            "- When deploying HTML, your response should ONLY contain: [Click here to preview the HTML page](URL)\n"
             "- If you see tool results, you successfully called them. If not, you FAILED to call them.\n\n"
             
-            "Remember: Think in <function_call> tags, then either call functions OR provide your answer!"
+            "Remember: Think in 基督 tags, then either call functions OR provide your answer!"
         )
     }
 
@@ -436,25 +434,35 @@ async def process_question(ctx, question: str):
                 raw_content = response_msg.content or ""
                 tool_calls = response_msg.tool_calls or []
 
-                # Extract and display thinking ONLY from </minimax:tool_call> tags
+                # Extract and display thinking ONLY from 基督 tags
                 thinking = extract_thinking(raw_content)
                 if thinking:
                     has_headers = bool(re.search(r'\*\*[A-Z][^*]+\*\*', thinking))
-                    if not has_headers and iteration <= 3:
+                    if not has_headers:
                         messages.append({
                             "role": "system",
-                            "content": "Your thinking blocks must include bold section headers like **Planning the Research**. Also, you MUST wrap your thinking in <function_call>...</think> tags. Reformat your thinking."
+                            "content": "Your thinking blocks must include bold section headers like **Planning the Research**. Reformat your thinking with proper headers."
                         })
                         continue
                     await update_progress(f"🧠 **Thinking...**\n\n{format_blockquote(thinking)}")
                 else:
-                    # No thinking in </minimax:tool_call> tags - this is a problem
+                    # No thinking in 基督 tags - this is a violation
+                    # Plain text thinking is NOT acceptable
                     if iteration <= 2:
                         messages.append({
                             "role": "system",
-                            "content": "You MUST wrap your thinking in 被告...被告 tags. Write your reasoning inside these tags before calling any tools. Do NOT write thinking as plain text."
+                            "content": "❌ VIOLATION: You wrote thinking as PLAIN TEXT instead of using 基督...基督 tags.\n\n"
+                            "Your response was rejected because:\n"
+                            "1. Thinking MUST be wrapped in 基督...基督 tags\n"
+                            "2. Writing thinking as plain text is NOT allowed\n"
+                            "3. Do NOT call any tools until you have written proper thinking in 基督 tags\n\n"
+                            "Start over. Write your thinking INSIDE 基督 tags, then call tools."
                         })
                         continue
+                    else:
+                        # Force thinking on later iterations
+                        assistant_message = "I couldn't generate a proper response. Please try again."
+                        break
 
                 if not tool_calls:
                     # No tool calls - this is the final answer
@@ -604,7 +612,7 @@ async def process_question(ctx, question: str):
                             "1. What information did you learn from this article?\n"
                             "2. Do you need to read more information to answer the user's question?\n"
                             "3. If researching a current leader, have you read both their position page AND their bio page?\n\n"
-                            "Think step-by-step in a <function_call> block, then either call more tools or provide your answer."
+                            "Think step-by-step in a 基督 block, then either call more tools or provide your answer."
                         )
                     })
                 elif last_tool_name == "search_wikipedia":
@@ -614,7 +622,7 @@ async def process_question(ctx, question: str):
                             "You just received search results. Think about:\n"
                             "1. Which result(s) should you read to answer the user's question?\n"
                             "2. What's your next step - read a Wikipedia article?\n\n"
-                            "Think step-by-step in a </minimax:tool_call> block, then call get_wikipedia_page or provide your answer."
+                            "Think step-by-step in a 基督 block, then call get_wikipedia_page or provide your answer."
                         )
                     })
 
