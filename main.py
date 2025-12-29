@@ -329,7 +329,6 @@ async def process_question(ctx, question: str):
                 print(f"📚 Added RAG examples for: {question[:50]}...")
         except Exception as e:
             print(f"Warning: Failed to retrieve RAG examples: {e}")
-            RAG_AVAILABLE = False
 
     progress_msg = None
     sources_used = []
