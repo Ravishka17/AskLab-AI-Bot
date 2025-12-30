@@ -365,6 +365,8 @@ async def process_question(ctx, question: str):
 
     progress_msg = None
     sources_used = []
+    is_waiting_final_answer = False
+    has_done_research = False
 
     try:
         async with ctx.typing():
@@ -435,7 +437,10 @@ async def process_question(ctx, question: str):
                 raw_content = response_msg.content or ""
                 tool_calls = response_msg.tool_calls or []
 
-                # Extract and display thinking ONLY from 基督 tags
+                # Check if this is a simple question that doesn't require thinking (define before we need it)
+                is_simple_greeting = len(question.strip()) < 20 and not any(word in question.lower() for word in ['president', 'prime minister', 'current', 'search', 'find', 'who', 'what', 'when', 'where', 'how', 'why'])
+                
+                # Extract thinking from 基督 tags (if present)
                 thinking = extract_thinking(raw_content)
                 if thinking:
                     has_headers = bool(re.search(r'\*\*[A-Z][^*]+\*\*', thinking))
@@ -446,16 +451,10 @@ async def process_question(ctx, question: str):
                         })
                         continue
                     await update_progress(f"🧠 **Thinking...**\n\n{format_blockquote(thinking)}")
-                else:
-                    # No thinking in 基督 tags - this could be a simple greeting or error
-                    # Check if this is a simple question that doesn't require thinking
-                    is_simple_greeting = len(question.strip()) < 20 and not any(word in question.lower() for word in ['president', 'prime minister', 'current', 'search', 'find', 'who', 'what', 'when', 'where', 'how', 'why'])
-                    
-                    if not tool_calls and is_simple_greeting:
-                        # This is likely a simple greeting - allow it to proceed without thinking
-                        pass  # Continue to processing as final answer
-                    elif iteration <= 2:
-                        # Reject and ask for proper thinking format (but don't force it for simple questions)
+                # Check if we have tool calls without thinking - that's always an error
+                elif tool_calls and not thinking:
+                    # Tool calls require thinking - reject if no thinking
+                    if iteration <= 5:
                         messages.append({
                             "role": "system",
                             "content": "❌ VIOLATION: You wrote thinking as PLAIN TEXT instead of using 基督...基督 tags.\n\n"
@@ -467,15 +466,32 @@ async def process_question(ctx, question: str):
                         })
                         continue
                     else:
-                        # Force error on later iterations for non-simple questions
-                        assistant_message = "I couldn't generate a proper response. Please try again."
-                        break
+                        # Too many iterations - try to continue anyway
+                        print(f"Warning: Tool calls without thinking tags after {iteration} iterations")
+                # Check if we have NO tool calls AND NO thinking - could be direct answer or error
+                elif not tool_calls and not thinking:
+                    if is_simple_greeting:
+                        # This is likely a simple greeting without thinking - allow it
+                        pass  # Continue to final answer processing
+                    elif iteration <= 2:
+                        # Ask for thinking format on non-simple questions
+                        messages.append({
+                            "role": "system",
+                            "content": "Please include your thinking in 基督...基督 tags with proper section headers."
+                        })
+                        continue
+                    else:
+                        # Allow to proceed as fallback after too many iterations
+                        print(f"Warning: After {iteration} iterations without thinking. Attempting fallback for: {question[:30]}...")
 
                 if not tool_calls:
                     # No tool calls - this is the final answer
                     final_thinking = extract_thinking(raw_content)
                     if final_thinking:
                         await update_progress(f"🧠 **Thinking...**\n\n{format_blockquote(final_thinking)}")
+                    elif is_simple_greeting and not final_thinking:
+                        # For simple greetings without thinking, show a minimal thinking message
+                        await update_progress(f"🧠 **Greeting Response...**\n\n> Processing simple greeting")
                     
                     assistant_message = remove_thinking_tags(raw_content)
                     
