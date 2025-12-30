@@ -661,33 +661,6 @@ if __name__ == "__main__":
         print("ERROR: DISCORD_BOT_TOKEN missing")
         exit(1)
     bot.run(DISCORD_BOT_TOKEN)
-, thinking):
-                        print(f"CRITICAL: AI is generating FAKE tool results instead of thinking. Correcting...")
-                        messages.append({
-                            "role": "system", 
-                            "content": "❌ ERROR: You are generating FAKE tool result text instead of THINKING.\n\n"
-                            "WRONG: 🔍 **Searching Wikipedia** followed by > query\n"
-                            "RIGHT: 基督\\n**Planning My Search**\\nI need to find Sri Lanka's current president\\n基督\n\n"
-                            "Do NOT write fake search results. Only write your THINKING in 基督 tags."
-                        })
-                        continue
-                    
-                    await update_progress(f"🧠 **Thinking...**\n\n{format_blockquote(thinking)}")
-                
-                # Force the AI to use thinking tags for complex questions requiring research
-                if not thinking and (iteration <= 3) and not is_simple_greeting:
-                    messages.append({
-                        "role": "system",
-                        "content": "❌ ERROR: You are not using 基督 thinking tags.\n\n"
-                        "For research questions, you MUST:\n"
-                        "1. Use 基督 tags for ALL thinking\n"
-                        "2. Include section headers like **Planning My Research**\n"
-                        "3. Do NOT generate fake search results\\n"
-                        "4. Let the SYSTEM call tools, don't describe calling them"
-                    })
-                    continue
-                
-                if tool_calls and not thinking:
                     # Tool calls without thinking - log warning but allow to proceed
                     if iteration <= 5:
                         print(f"Warning: Tool calls without thinking tags (iteration {iteration})")
