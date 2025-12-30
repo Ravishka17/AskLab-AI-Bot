@@ -420,24 +420,278 @@ async def process_question(ctx, question: str):
                             "content": "Your thinking blocks must include bold section headers like **Planning the Research**. Reformat your thinking with proper headers."
                         })
                         continue
-                    await update_progress(f"🧠 **Thinking...**\n\n{format_blockquote(thinking)}")
-                # Check if we have tool calls without thinking - that's always an error
-                elif tool_calls and not thinking:
-                    # Tool calls require thinking - reject if no thinking
-                    if iteration <= 5:
+                    
+                    # Check if AI is generating FAKE tool results (search engine pattern)
+                    if re.search(r'🔍 \*\*Searching Wikipedia.*?\*\*.*?\n\n>.*?\n\n', thinking, re.DOTALL):
+                        print(f"CRITICAL: AI is generating FAKE tool results instead of thinking. Correcting...")
+                        messages.append({
+                            "role": "system", 
+                            "content": "❌ ERROR: You are generating FAKE tool result text instead of THINKING.\n\n"
+                            "WRONG: 🔍 **Searching Wikipedia** followed by > query\n"
+                            "RIGHT: 基督\\n**Planning My Search**\\nI need to find Sri Lanka's current president\\n基督\n\n"
+                            "Do NOT write fake search results. Only write your THINKING in 基督 tags."
+                        })
+                        continue
+                
+                # Check if we have NO tool calls AND NO thinking - could be direct answer or error
+                elif not tool_calls and not thinking:
+                    if is_simple_greeting:
+                        # This is likely a simple greeting without thinking - allow it
+                        pass  # Continue to final answer processing
+                    elif iteration <= 2:
+                        # Ask for thinking format on non-simple questions
                         messages.append({
                             "role": "system",
-                            "content": "❌ VIOLATION: You wrote thinking as PLAIN TEXT instead of using 基督...基督 tags.\n\n"
-                            "Your response was rejected because:\n"
-                            "1. Thinking MUST be wrapped in 基督...基督 tags\n"
-                            "2. Writing thinking as plain text is NOT allowed\n"
-                            "3. Do NOT call any tools until you have written proper thinking in 基督 tags\n\n"
-                            "Start over. Write your thinking INSIDE 基督 tags, then call tools."
+                            "content": "Please include your thinking in 基督...基督 tags with proper section headers."
                         })
                         continue
                     else:
-                        # Too many iterations - try to continue anyway
-                        print(f"Warning: Tool calls without thinking tags after {iteration} iterations")
+                        # Allow to proceed as fallback after too many iterations
+                        print(f"Warning: After {iteration} iterations without thinking. Attempting fallback for: {question[:30]}...")
+
+                if not tool_calls:
+                    # No tool calls - this is the final answer
+                    final_thinking = extract_thinking(raw_content)
+                    if final_thinking:
+                        await update_progress(f"🧠 **Thinking...**\n\n{format_blockquote(final_thinking)}")
+                    elif is_simple_greeting and not final_thinking:
+                        # For simple greetings without thinking, show a minimal thinking message
+                        await update_progress(f"🧠 **Greeting Response...**\n\n> Processing simple greeting")
+                    
+                    assistant_message = remove_thinking_tags(raw_content)
+                    
+                    # Clean up AI-generated content
+                    assistant_message = re.sub(
+                        r'📚\s*\*\*Sources\*\*.*?(?=\n\n|$)',
+                        '',
+                        assistant_message,
+                        flags=re.DOTALL
+                    ).strip()
+                    assistant_message = re.sub(
+                        r'```html.*?(?=\n\n|$)',
+                        '',
+                        assistant_message,
+                        flags=re.DOTALL | re.IGNORECASE
+                    ).strip()
+                    assistant_message = re.sub(
+                        r'\[Wikipedia\]\(https?://[^\)]+\)',
+                        '',
+                        assistant_message
+                    ).strip()
+                    assistant_message = re.sub(
+                        r'\*Source:.*?\*',
+                        '',
+                        assistant_message,
+                        flags=re.IGNORECASE
+                    ).strip()
+                    assistant_message = re.sub(
+                        r'\[Calls? .+?\]',
+                        '',
+                        assistant_message,
+                        flags=re.IGNORECASE
+                    ).strip()
+                    while '\n\n\n' in assistant_message:
+                        assistant_message = assistant_message.replace('\n\n\n', '\n\n')
+                    
+                    clean_content = remove_thinking_tags(raw_content)
+                    conversation_history[channel_id].append({
+                        "role": "assistant", 
+                        "content": clean_content if clean_content else "Acknowledged."
+                    })
+                    break
+
+                # Process tool calls
+                tool_results = []
+                
+                for tool_call in tool_calls:
+                    fname = tool_call.function.name
+                    try:
+                        fargs = json.loads(tool_call.function.arguments)
+                    except:
+                        fargs = {}
+
+                    tool_result = ""
+                    
+                    if fname == "search_wikipedia":
+                        query = fargs.get('query', '')
+                        await update_progress(f"🔍 **Searching Wikipedia...**\n\n> {query}")
+                        tool_result = await execute_wiki_search(query)
+
+                    elif fname == "get_wikipedia_page":
+                        title = fargs.get('title', '')
+                        await update_progress(f"📖 **Reading Article...**\n\n> {title}")
+                        tool_result = await execute_wiki_page(title)
+                        
+                        # Track source
+                        wiki_url = f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}"
+                        if wiki_url not in sources_used:
+                            sources_used.append(wiki_url)
+                        
+                        # Track page title for RAG validation
+                        if 'pages_read_tracker' in locals() and RAG_AVAILABLE and RAG_STORE is not None:
+                            pages_read_tracker.append(title)
+                            try:
+                                completeness = RAG_STORE.check_research_completeness(question, pages_read_tracker)
+                                if not completeness['complete']:
+                                    messages.append({
+                                        "role": "system",
+                                        "content": f"⚠️ Research Incomplete: {completeness['reason']}"
+                                    })
+                            except:
+                                pass
+
+                    elif fname == "deploy_html":
+                        html_value = fargs.get('value', '')
+                        await update_progress(f"🌐 **Deploying HTML...**")
+                        tool_result = await execute_deploy_html(html_value)
+
+                    tool_results.append({
+                        "tool_call_id": tool_call.id,
+                        "role": "tool",
+                        "name": fname,
+                        "content": str(tool_result)
+                    })
+
+                # Add assistant message with tool calls to history
+                clean_content = remove_thinking_tags(raw_content)
+                if not clean_content:
+                    if tool_calls:
+                        tool_names = [tc.function.name for tc in tool_calls]
+                        if len(tool_names) == 1:
+                            tool_name = tool_names[0]
+                            if tool_name == "search_wikipedia":
+                                clean_content = "Searching Wikipedia for information."
+                            elif tool_name == "get_wikipedia_page":
+                                clean_content = "Reading Wikipedia article."
+                            elif tool_name == "deploy_html":
+                                clean_content = "Deploying HTML to public URL."
+                            else:
+                                clean_content = f"Calling {tool_name} tool."
+                        else:
+                            clean_content = f"Calling tools: {', '.join(tool_names)}."
+                    else:
+                        clean_content = "Processing request."
+                    
+                messages.append({
+                    "role": "assistant",
+                    "content": clean_content,
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments
+                            }
+                        } for tc in tool_calls
+                    ]
+                })
+
+                # Add tool results to messages
+                messages.extend(tool_results)
+
+                # After reading Wikipedia articles, prompt AI to think about what was learned
+                last_tool_name = tool_results[-1].get("name", "") if tool_results else ""
+                if last_tool_name == "get_wikipedia_page":
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            "You just read a Wikipedia article. Now think about:\n"
+                            "1. What information did you learn from this article?\n"
+                            "2. Do you need to read more information to answer the user's question?\n"
+                            "3. If researching a current leader, have you read both their position page AND their bio page?\n\n"
+                            "Think step-by-step in a 基督 block, then either call more tools or provide your answer."
+                        )
+                    })
+                elif last_tool_name == "search_wikipedia":
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            "You just received search results. Think about:\n"
+                            "1. Which result(s) should you read to answer the user's question?\n"
+                            "2. What's your next step - read a Wikipedia article?\n\n"
+                            "Think step-by-step in a 基督 block, then call get_wikipedia_page or provide your answer."
+                        )
+                    })
+
+            # At max iterations, just extract what we have
+            if iteration >= max_iterations:
+                assistant_message = remove_thinking_tags(raw_content)
+
+            # Add sources if any were used
+            if sources_used and assistant_message:
+                sources_text = "\n\n📚 **Sources**\n"
+                for idx, source in enumerate(sources_used, 1):
+                    sources_text += f"{idx}. [Wikipedia]({source})\n"
+                assistant_message += sources_text
+
+            # Send final answer as separate message
+            if assistant_message:
+                final_text = assistant_message.strip()
+                
+                # Send answer as a regular message (not in embed)
+                while final_text:
+                    await ctx.send(final_text[:1990])
+                    final_text = final_text[1990:]
+            else:
+                await ctx.send("I couldn't generate a response. Please try again.")
+
+    except Exception as e:
+        error_text = f"❌ **Error:** {str(e)}"
+        try:
+            if progress_msg:
+                error_embed = discord.Embed(
+                    title="Reasoning",
+                    description=error_text[:4096],
+                    color=0xED4245
+                )
+                await progress_msg.edit(embed=error_embed)
+            else:
+                await ctx.send(error_text)
+        except:
+            pass
+        
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+if __name__ == "__main__":
+    if not DISCORD_BOT_TOKEN:
+        print("ERROR: DISCORD_BOT_TOKEN missing")
+        exit(1)
+    bot.run(DISCORD_BOT_TOKEN)
+, thinking):
+                        print(f"CRITICAL: AI is generating FAKE tool results instead of thinking. Correcting...")
+                        messages.append({
+                            "role": "system", 
+                            "content": "❌ ERROR: You are generating FAKE tool result text instead of THINKING.\n\n"
+                            "WRONG: 🔍 **Searching Wikipedia** followed by > query\n"
+                            "RIGHT: 基督\\n**Planning My Search**\\nI need to find Sri Lanka's current president\\n基督\n\n"
+                            "Do NOT write fake search results. Only write your THINKING in 基督 tags."
+                        })
+                        continue
+                    
+                    await update_progress(f"🧠 **Thinking...**\n\n{format_blockquote(thinking)}")
+                
+                # Force the AI to use thinking tags for complex questions requiring research
+                if not thinking and (iteration <= 3) and not is_simple_greeting:
+                    messages.append({
+                        "role": "system",
+                        "content": "❌ ERROR: You are not using 基督 thinking tags.\n\n"
+                        "For research questions, you MUST:\n"
+                        "1. Use 基督 tags for ALL thinking\n"
+                        "2. Include section headers like **Planning My Research**\n"
+                        "3. Do NOT generate fake search results\\n"
+                        "4. Let the SYSTEM call tools, don't describe calling them"
+                    })
+                    continue
+                
+                if tool_calls and not thinking:
+                    # Tool calls without thinking - log warning but allow to proceed
+                    if iteration <= 5:
+                        print(f"Warning: Tool calls without thinking tags (iteration {iteration})")
+                    # Don't block - let it proceed to tool execution
                 # Check if we have NO tool calls AND NO thinking - could be direct answer or error
                 elif not tool_calls and not thinking:
                     if is_simple_greeting:
