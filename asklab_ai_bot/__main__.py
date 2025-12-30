@@ -544,6 +544,8 @@ async def process_question(ctx, question: str):
     reasoning_embed = None
     overflow_embed = None
     sources_used = []
+    is_waiting_final_answer = False
+    last_good_content = None
 
     try:
         async with ctx.typing():
@@ -998,6 +1000,13 @@ async def process_question(ctx, question: str):
                     assistant_message = "Hello! I'm AskLab AI, here to help answer your questions. I can help you research current events, world leaders, and various topics. What would you like to know?"
                 else:
                     assistant_message = "I processed your request but encountered an issue. Please try asking your question again with different wording."
+
+            # Add sources if any were used
+            if sources_used and assistant_message:
+                sources_text = "\n\n📚 **Sources**\n"
+                for idx, source in enumerate(sources_used, 1):
+                    sources_text += f"{idx}. [Wikipedia]({source})\n"
+                assistant_message += sources_text
 
             # Send final answer as separate message
             if assistant_message:
