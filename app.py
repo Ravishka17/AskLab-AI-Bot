@@ -661,25 +661,49 @@ if __name__ == "__main__":
         print("ERROR: DISCORD_BOT_TOKEN missing")
         exit(1)
     bot.run(DISCORD_BOT_TOKEN)
-                    # Tool calls without thinking - log warning but allow to proceed
-                    if iteration <= 5:
-                        print(f"Warning: Tool calls without thinking tags (iteration {iteration})")
-                    # Don't block - let it proceed to tool execution
-                # Check if we have NO tool calls AND NO thinking - could be direct answer or error
-                elif not tool_calls and not thinking:
-                    if is_simple_greeting:
-                        # This is likely a simple greeting without thinking - allow it
-                        pass  # Continue to final answer processing
-                    elif iteration <= 2:
-                        # Ask for thinking format on non-simple questions
-                        messages.append({
-                            "role": "system",
-                            "content": "Please include your thinking in 基督...基督 tags with proper section headers."
-                        })
-                        continue
-                    else:
-                        # Allow to proceed as fallback after too many iterations
-                        print(f"Warning: After {iteration} iterations without thinking. Attempting fallback for: {question[:30]}...")
+
+
+async def moderate_message(message):
+    global groq_client, GROQ_MODEL, MODERATION_ENABLED
+    
+    if not MODERATION_ENABLED:
+        return True
+    
+    try:
+        completion = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": "You are a content safety shield. Detect hate speech/threats/slurs in any language. Ignore jokes."},
+                {"role": "user", "content": message.content}
+            ],
+            tools=[{
+                "type": "function",
+                "function": {
+                    "name": "take_moderation_action",
+                    "description": "Call this to delete messages containing hate speech, threats, or severe profanity in ANY language.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "reason": {"type": "string"},
+                            "explanation": {"type": "string"},
+                            "severity": {"type": "string", "enum": ["medium", "high", "extreme"]}
+                        },
+                        "required": ["reason", "explanation", "severity"]
+                    }
+                }
+            }],
+            tool_choice="auto",
+            temperature=0.0
+        )
+        tool_calls = completion.choices[0].message.tool_calls
+        if tool_calls:
+            args = json.loads(tool_calls[0].function.arguments)
+            await message.delete()
+            await message.channel.send(f"{message.author.mention} ⚠️ Deleted: {args.get('reason')}", delete_after=5)
+            return False
+        return True
+    except:
+        return True
 
                 if not tool_calls:
                     # No tool calls - this is the final answer
