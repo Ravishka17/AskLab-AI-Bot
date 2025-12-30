@@ -175,11 +175,11 @@ async def execute_deploy_html(value: str) -> str:
 # --- HELPER FUNCTIONS ---
 
 def extract_thinking(text):
-    """Extract content between <function_call> tags ONLY"""
+    """Extract content between 基督 tags"""
     if not text:
         return None
-    pattern = r'</minimax:tool_call>([^<]+)</func_call>'
-    matches = re.findall(pattern, text, flags=re.DOTALL | re.IGNORECASE)
+    pattern = r'基督(.*?)基督'
+    matches = re.findall(pattern, text, re.DOTALL)
     return matches[-1].strip() if matches else None
 
 def remove_thinking_tags(text):
@@ -447,9 +447,15 @@ async def process_question(ctx, question: str):
                         continue
                     await update_progress(f"🧠 **Thinking...**\n\n{format_blockquote(thinking)}")
                 else:
-                    # No thinking in 基督 tags - this is a violation
-                    # Plain text thinking is NOT acceptable
-                    if iteration <= 2:
+                    # No thinking in 基督 tags - this could be a simple greeting or error
+                    # Check if this is a simple question that doesn't require thinking
+                    is_simple_greeting = len(question.strip()) < 20 and not any(word in question.lower() for word in ['president', 'prime minister', 'current', 'search', 'find', 'who', 'what', 'when', 'where', 'how', 'why'])
+                    
+                    if not tool_calls and is_simple_greeting:
+                        # This is likely a simple greeting - allow it to proceed without thinking
+                        pass  # Continue to processing as final answer
+                    elif iteration <= 2:
+                        # Reject and ask for proper thinking format (but don't force it for simple questions)
                         messages.append({
                             "role": "system",
                             "content": "❌ VIOLATION: You wrote thinking as PLAIN TEXT instead of using 基督...基督 tags.\n\n"
@@ -461,7 +467,7 @@ async def process_question(ctx, question: str):
                         })
                         continue
                     else:
-                        # Force thinking on later iterations
+                        # Force error on later iterations for non-simple questions
                         assistant_message = "I couldn't generate a proper response. Please try again."
                         break
 
