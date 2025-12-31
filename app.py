@@ -1,34 +1,16 @@
 #!/usr/bin/env python3
 """
-Main entry point for AskLab AI Discord Bot on fps.ms.
-This file is the required entry point for fps.ms container hosting.
+AskLab AI Bot - Pterodactyl Entry Point
+Self-contained version for panel hosting
 """
 
 import os
 import sys
-
-# Ensure the project root is in sys.path
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
-
-# Import RAG examples module for few-shot prompting
-RAG_AVAILABLE = False
-RAG_STORE = None
-try:
-    from rag_examples import RAGExampleStore
-    RAG_STORE = RAGExampleStore()
-    RAG_AVAILABLE = True
-    print("✓ RAG examples module loaded successfully")
-except ImportError as e:
-    print(f"Info: RAG examples module not available ({e})")
-
-# Import bot modules
 import json
 import re
-from typing import List
-import discord
+import asyncio
 import aiohttp
+import discord
 from discord.ext import commands
 from groq import Groq
 from dotenv import load_dotenv
@@ -39,7 +21,7 @@ load_dotenv()
 # Configuration
 DISCORD_BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN')
 GROQ_API_KEY = os.getenv('GROQ_API_KEY')
-GROQ_MODEL = os.getenv('GROQ_MODEL', 'llama3-8b-8192')
+GROQ_MODEL = os.getenv('GROQ_MODEL', 'moonshotai/kimi-k2-instruct-0905')
 GROQ_TEMPERATURE = float(os.getenv('GROQ_TEMPERATURE', '0.7'))
 
 # Initialize Groq client
@@ -52,16 +34,18 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 conversation_history = {}
 
-# --- TOOLS ---
+# --- TOOL DEFINITIONS ---
 TOOLS = [
     {
         "type": "function",
         "function": {
             "name": "search_wikipedia",
-            "description": "Search Wikipedia for information.",
+            "description": "Search Wikipedia for information",
             "parameters": {
                 "type": "object",
-                "properties": {"query": {"type": "string", "description": "Search query for Wikipedia"}},
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"}
+                },
                 "required": ["query"]
             }
         }
@@ -70,33 +54,22 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_wikipedia_page",
-            "description": "Read the full content of a Wikipedia article.",
+            "description": "Read Wikipedia article",
             "parameters": {
                 "type": "object",
-                "properties": {"title": {"type": "string", "description": "Exact Wikipedia article title to read"}},
+                "properties": {
+                    "title": {"type": "string", "description": "Article title"}
+                },
                 "required": ["title"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "deploy_html",
-            "description": "Deploy HTML code to a public URL.",
-            "parameters": {
-                "type": "object",
-                "properties": {"value": {"type": "string", "description": "HTML code to deploy"}},
-                "required": ["value"]
             }
         }
     }
 ]
 
-
 # --- WIKIPEDIA FUNCTIONS ---
 
 async def execute_wiki_search(query: str) -> str:
-    """Execute Wikipedia search using the official API"""
+    """Execute Wikipedia search"""
     url = "https://en.wikipedia.org/w/api.php"
     params = {
         "action": "query",
@@ -120,13 +93,14 @@ async def execute_wiki_search(query: str) -> str:
                         snippet = item['snippet'].replace('<span class="searchmatch">', '').replace('</span>', '')
                         results.append(f"- {item['title']}: {snippet}")
                     return "\n".join(results) if results else "No results found."
-                return f"Error: Wikipedia API returned status {response.status}"
+                else:
+                    return f"Error: Wikipedia API returned status {response.status}"
     except Exception as e:
-        return f"Error searching Wikipedia: {str(e)}"
+        return f"Error: {str(e)}"
 
 
 async def execute_wiki_page(title: str) -> str:
-    """Execute Wikipedia page read using the official API"""
+    """Execute Wikipedia page read"""
     url = "https://en.wikipedia.org/w/api.php"
     params = {
         "action": "query",
@@ -154,87 +128,64 @@ async def execute_wiki_page(title: str) -> str:
                                 return extract[:3000] + "... (truncated)"
                             return extract if extract else "No content available."
                     return "Page not found."
-                return f"Error: Wikipedia API returned status {response.status}"
+                else:
+                    return f"Error: Wikipedia API returned status {response.status}"
     except Exception as e:
-        return f"Error reading Wikipedia page: {str(e)}"
-
-
-async def execute_deploy_html(value: str) -> str:
-    """Deploy HTML using EdgeOne Pages MCP"""
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post("http://localhost:3001/deploy", json={"value": value}) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    return data.get('url', 'Deployment successful but no URL returned')
-                return f"Error: Deploy returned status {response.status}"
-    except Exception as e:
-        return f"Error deploying HTML: {str(e)}"
+        return f"Error: {str(e)}"
 
 
 # --- HELPER FUNCTIONS ---
 
-def extract_thinking(text):
-    """Extract content between <function_call> tags ONLY"""
+def extract_thinking(text: str) -> str | None:
+    """Extract content between <think> tags"""
     if not text:
         return None
-    pattern = r'</minimax:tool_call>([^<]+)</func_call>'
-    matches = re.findall(pattern, text, flags=re.DOTALL | re.IGNORECASE)
+    matches = re.findall(r'<think>(.*?)</think>', text, re.DOTALL)
     return matches[-1].strip() if matches else None
 
-def remove_thinking_tags(text):
-    """Remove thinking tags from text"""
+
+def remove_thinking_tags(text: str) -> str:
+    """Remove <think> tags"""
     if not text:
         return ""
-    return re.sub(r'基督.*?基督', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+    return re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+
 
 def format_blockquote(text: str) -> str:
-    """Format text as blockquote with clean structure"""
+    """Format as blockquote"""
     if not text:
         return ""
-    
-    lines = text.strip().splitlines()
-    formatted = []
-    
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        elif line.startswith("**") and line.endswith("**"):
-            if formatted:
-                formatted.append("")
-            formatted.append(f"> {line}")
-        else:
-            formatted.append(f"> {line}")
-    
-    return "\n".join(formatted)
+    return '\n'.join(f"> {line}" for line in text.strip().split('\n') if line.strip())
 
 
 @bot.event
 async def on_ready():
     print(f'{bot.user} has connected to Discord!')
-    print('✅ Wikipedia System: Online')
+    print('✅ Bot ready')
+
 
 @bot.event
 async def on_message(message):
     if message.author == bot.user:
         return
+    
     if bot.user in message.mentions:
         question = message.content.replace(f'<@{bot.user.id}>', '').strip()
         if question:
-            class MessageContext:
-                def __init__(self, message):
-                    self.channel = message.channel
-                    self.send = message.channel.send
-                    self.author = message.author
-                    self.typing = message.channel.typing
-            ctx = MessageContext(message)
-            await process_question(ctx, question)
+            ctx = type('Context', (), {
+                'channel': message.channel,
+                'send': message.channel.send,
+                'author': message.author,
+                'typing': message.channel.typing
+            })
+            await bot.loop.create_task(process_question(ctx, question))
         return
+    
     await bot.process_commands(message)
 
 
 async def process_question(ctx, question: str):
+    """Process user question with Wikipedia research"""
     channel_id = ctx.channel.id
     
     if channel_id not in conversation_history:
@@ -244,161 +195,87 @@ async def process_question(ctx, question: str):
     
     if len(conversation_history[channel_id]) > 20:
         conversation_history[channel_id] = conversation_history[channel_id][-20:]
-
+    
+    # System prompt - ULTRA EXPLICIT INSTRUCTIONS
     system_message = {
         "role": "system",
         "content": (
             "You are AskLab AI - a helpful reasoning assistant with Wikipedia research capabilities.\n\n"
-            "🎯 YOUR CORE CAPABILITIES:\n"
-            "- Answer questions using your training knowledge (up to January 2025)\n"
-            "- Research current information on Wikipedia when needed\n"
-            "- Think step-by-step using </minimax:tool_call>...</func_call> tags\n\n"
-            "⚠️ MANDATORY REQUIREMENT:\n"
-            "You MUST write your thinking inside <function_call>...</think> tags. This is non-negotiable.\n"
-            "- Think BEFORE calling tools to plan your research\n"
-            "- Think AFTER reading articles to analyze what you learned\n"
-            "- Never respond without thinking in 基督 tags\n\n"
-            
-            "⚙️ WHEN TO USE WIKIPEDIA TOOLS:\n"
-            "MANDATORY: You MUST use Wikipedia tools for:\n"
-            "1. Questions about current presidents, prime ministers, or world leaders\n"
-            "2. Questions about current events, positions, or status (especially after 2023)\n"
-            "3. Any topic where current information may have changed since your training\n\n"
-            
-            "⚠️ CRITICAL: Do NOT rely on your training knowledge for current information!\n"
-            "- For current presidents/leaders: You MUST call search_wikipedia FIRST\n"
-            "- Your thinking MUST show the actual search and reading process\n"
-            "- The ONLY way to get current information is by calling the tools\n"
-            "- NEVER say 'From the Wikipedia page' before actually calling the tools\n\n"
-            
-            "⏰ WHEN TO PROVIDE THE FINAL ANSWER:\n"
-            "- After you have read ALL necessary Wikipedia sources\n"
-            "- After you have gathered comprehensive information\n"
-            "- Once you say 'Synthesizing the Information', that should be your LAST thinking block before the answer\n"
-            "- The pattern should be: Research → Synthesize → ANSWER\n\n"
-            
-            "🧠 THINKING PROCESS - HOW TO USE 主席TION TAGS:\n"
-            "You MUST wrap ALL your thinking in 基督...基督 tags.\n"
-            "Example:\n\n"
-            "基督\n"
-            "**Understanding the Request**\n"
-            "The user wants to know who is the current president of Sri Lanka.\n"
-            "**Planning My Approach**\n"
-            "I need to search Wikipedia to get current information.\n"
-            "基督\n\n"
-            "🔍 **Searching Wikipedia...**\n\n"
-            "> current president of Sri Lanka\n\n"
-            "Then you see the search results.\n\n"
-            "You MUST include 基督 tags around your thinking - NOT as plain text!\n\n"
-            
-            "For research questions about current world leaders:\n\n"
-            "基督\n"
-            "**Understanding the Request**\n"
-            "User wants to know who is currently serving as president of Sri Lanka.\n"
-            "**Planning My Approach**\n"
-            "Since my training data has a cutoff date, I need to search Wikipedia to get the latest information.\n"
-            "基督\n\n"
-            "🔍 **Searching Wikipedia...**\n\n"
-            "> current president of Sri Lanka\n\n"
-            "Then you see the search results.\n\n"
-            "基督\n"
-            "**Analyzing the Results**\n"
-            "I see search results that include 'President of Sri Lanka' which should have current information.\n"
-            "**Planning the Next Step**\n"
-            "I'll call get_wikipedia_page to read the 'President of Sri Lanka' article.\n"
-            "基督\n\n"
-            "📖 **Reading Article...**\n\n"
-            "> President of Sri Lanka\n\n"
-            "Then you see the article content.\n\n"
-            "基督\n"
-            "**Analyzing What I Learned**\n"
-            "I found out that the current president of Sri Lanka is Anura Kumara Dissanayake.\n"
-            "**Planning the Next Step**\n"
-            "I'll search for 'Anura Kumara Dissanayake' on Wikipedia to read his bio page.\n"
-            "基督\n\n"
-            "🔍 **Searching Wikipedia...**\n\n"
-            "> Anura Kumara Dissanayake\n\n"
-            "Then you see the search result.\n\n"
-            "基督\n"
-            "**Analyzing the Results**\n"
-            "I found the 'Anura Kumara Dissanayake' article.\n"
-            "**Planning the Next Step**\n"
-            "Let me read this article to find more information about him.\n"
-            "基督\n\n"
-            "📖 **Reading Article...**\n\n"
-            "> Anura Kumara Dissanayake\n\n"
-            "Then you see the article content.\n\n"
-            "基督\n"
-            "**Synthesizing the Information**\n"
-            "I've found comprehensive information about the current president of Sri Lanka from both Wikipedia pages.\n"
-            "**Preparing the Answer**\n"
-            "Now I can provide a complete answer.\n"
-            "基督\n\n"
-            "The current president of Sri Lanka is Anura Kumara Dissanayake (commonly known as AKD), who assumed office on September 23, 2024, after winning the 2024 presidential election.\n\n"
-            "[Sources automatically added by system]\n\n"
-            
-            "⚠️ CRITICAL RULES:\n"
-            "- MANDATORY: Every thinking block MUST be wrapped in 基督...基督 tags\n"
-            "- MANDATORY: Think BEFORE calling your first function\n"
-            "- For questions about current leaders: Search, read position page, read person's bio (MUST do both!)\n"
-            "- NEVER stop after reading just the position page - also read the person's bio\n"
-            "- If you only read one page, your answer is incomplete - keep researching\n"
-            "- Always gather comprehensive information before answering\n"
-            "- Use **bold** for section headers inside thinking blocks\n"
-            "- Do NOT manually add a Sources section - it's added automatically\n"
-            "- If you see tool results, you successfully called them. If not, you FAILED to call them.\n\n"
-            
-            "Remember: Think in 基督 tags, then either call functions OR provide your answer!"
+            "🎯 CORE CAPABILITIES:\n"
+            "- Answer questions using training knowledge\n"
+            "- Research current information on Wikipedia\n"
+            "- Think step-by-step using <think> tags\n\n"
+            "⚠️ ULTRA CRITICAL - READ CAREFULLY:\n"
+            "1. Wrap ONLY your THINKING in <think>...</think> tags\n"
+            "2. Use section headers like **Planning the Research** INSIDE think tags\n"
+            "3. Let the SYSTEM call tools - DON'T write fake system messages\n"
+            "4. For current leaders: search AND read biography (2 pages)\n"
+            "5. AFTER </think> tags, provide FINAL ANSWER (no tags around it)\n"
+            "6. DON'T write fake actions - just THINK normally\n"
+            "7. DON'T describe what system does - just THINK and ANSWER\n\n"
+            "✅ CORRECT PATTERN:\n\n"
+            "<think>\n"
+            "**Planning the Research**\n"
+            "I need to find who is current president of Sri Lanka.\n"
+            "</think>\n\n"
+            "<think>\n"
+            "**Analyzing Search Results**\n"
+            "I see 'President of Sri Lanka' in results. Will read this.\n"
+            "</think>\n\n"
+            "<think>\n"
+            "**Reviewing Article**\n"
+            "Found current president is Anura Kumara Dissanayake. Need bio too.\n"
+            "</think>\n\n"
+            "<think>\n"
+            "**Synthesizing Information**\n"
+            "From both pages: Current president is Anura Kumara Dissanayake, took office Sept 23, 2024, represents NPP coalition.\n"
+            "</think>\n\n"
+            "The current president of Sri Lanka is Anura Kumara Dissanayake, who took office on September 23, 2024, after winning the 2024 presidential election. He represents the National People's Power (NPP) coalition and is the first Sri Lankan president elected from outside the country's traditional political parties.\n\n"
+            "❌ DEADLY ERRORS THAT WILL GET YOU FIRED:\n"
+            "- [SYSTEM: Calls tools] ← WRONG! Don't write this!\n"
+            "- <answer>text</answer> ← WRONG! No tags around final answer!\n"
+            "- **Synthesizing** (in thinking) then **Finalizing...** (more thinking) ← TOO MUCH!\n"
+            "- 🔍 **Searching** > query ← FAKE! Don't generate fake searches!"
         )
     }
-
-    # Add RAG-based few-shot examples to system message
-    pages_read_tracker = []
-    if RAG_AVAILABLE and RAG_STORE is not None:
-        try:
-            rag_additions = RAG_STORE.get_system_prompt_additions(question)
-            if rag_additions:
-                system_message["content"] += rag_additions
-                print(f"📚 Added RAG examples for: {question[:50]}...")
-        except Exception as e:
-            print(f"Warning: Failed to retrieve RAG examples: {e}")
-
+    
     progress_msg = None
     sources_used = []
-
+    has_done_research = False
+    
     try:
         async with ctx.typing():
             messages = [system_message] + conversation_history[channel_id]
+            
             max_iterations = 15
             iteration = 0
             assistant_message = ""
-            progress_entries: List[str] = []
+            progress_entries = []
             
+            # Create embed
             reasoning_embed = discord.Embed(
                 title="Reasoning",
                 description="🤔 **Processing...**",
                 color=0x5865F2
             )
             progress_msg = await ctx.send(embed=reasoning_embed)
-
-            async def update_progress(entry: str) -> None:
+            
+            async def update_progress(entry: str):
+                """Update reasoning embed"""
                 nonlocal progress_entries, progress_msg, reasoning_embed
                 if not progress_msg:
                     return
-                entry = (entry or "").strip()
-                if not entry:
-                    return
-                progress_entries.append(entry)
+                progress_entries.append(entry.strip())
                 content = "\n\n".join(progress_entries)
                 try:
                     reasoning_embed.description = content[:4096]
                     await progress_msg.edit(embed=reasoning_embed)
                 except:
                     pass
-
+            
             while iteration < max_iterations:
                 iteration += 1
-
+                
                 try:
                     response = groq_client.chat.completions.create(
                         model=GROQ_MODEL,
@@ -408,186 +285,107 @@ async def process_question(ctx, question: str):
                         temperature=GROQ_TEMPERATURE,
                         max_tokens=2000
                     )
-                except Exception as api_error:
-                    print(f"API Error on iteration {iteration}: {api_error}")
+                except Exception as e:
+                    print(f"API Error: {e}")
                     if iteration <= 2:
                         await update_progress("⚠️ Retrying...")
-                        import asyncio
                         await asyncio.sleep(1)
-                        try:
-                            response = groq_client.chat.completions.create(
-                                model=GROQ_MODEL,
-                                messages=messages,
-                                tools=TOOLS,
-                                tool_choice="auto",
-                                temperature=GROQ_TEMPERATURE,
-                                max_tokens=2000
-                            )
-                        except:
-                            if iteration == 1:
-                                raise api_error
-                            assistant_message = "I encountered an issue while researching. Please try again."
-                            break
+                        continue
                     else:
-                        raise api_error
-
+                        await ctx.send("I encountered an issue. Please try again.")
+                        return
+                
                 response_msg = response.choices[0].message
                 raw_content = response_msg.content or ""
                 tool_calls = response_msg.tool_calls or []
-
-                # Extract and display thinking ONLY from 基督 tags
+                
+                # Extract thinking
                 thinking = extract_thinking(raw_content)
                 if thinking:
-                    has_headers = bool(re.search(r'\*\*[A-Z][^*]+\*\*', thinking))
-                    if not has_headers:
-                        messages.append({
-                            "role": "system",
-                            "content": "Your thinking blocks must include bold section headers like **Planning the Research**. Reformat your thinking with proper headers."
-                        })
-                        continue
                     await update_progress(f"🧠 **Thinking...**\n\n{format_blockquote(thinking)}")
-                else:
-                    # No thinking in 基督 tags - this is a violation
-                    # Plain text thinking is NOT acceptable
-                    if iteration <= 2:
-                        messages.append({
-                            "role": "system",
-                            "content": "❌ VIOLATION: You wrote thinking as PLAIN TEXT instead of using 基督...基督 tags.\n\n"
-                            "Your response was rejected because:\n"
-                            "1. Thinking MUST be wrapped in 基督...基督 tags\n"
-                            "2. Writing thinking as plain text is NOT allowed\n"
-                            "3. Do NOT call any tools until you have written proper thinking in 基督 tags\n\n"
-                            "Start over. Write your thinking INSIDE 基督 tags, then call tools."
-                        })
-                        continue
-                    else:
-                        # Force thinking on later iterations
-                        assistant_message = "I couldn't generate a proper response. Please try again."
-                        break
-
+                
+                # No tool calls = final answer
                 if not tool_calls:
-                    # No tool calls - this is the final answer
                     final_thinking = extract_thinking(raw_content)
                     if final_thinking:
-                        await update_progress(f"🧠 **Thinking...**\n\n{format_blockquote(final_thinking)}")
+                        await update_progress(f"🧠 **Finalizing...**\n\n{format_blockquote(final_thinking)}")
                     
                     assistant_message = remove_thinking_tags(raw_content)
                     
-                    # Clean up AI-generated content
-                    assistant_message = re.sub(
-                        r'📚\s*\*\*Sources\*\*.*?(?=\n\n|$)',
-                        '',
-                        assistant_message,
-                        flags=re.DOTALL
-                    ).strip()
-                    assistant_message = re.sub(
-                        r'```html.*?(?=\n\n|$)',
-                        '',
-                        assistant_message,
-                        flags=re.DOTALL | re.IGNORECASE
-                    ).strip()
-                    assistant_message = re.sub(
-                        r'\[Wikipedia\]\(https?://[^\)]+\)',
-                        '',
-                        assistant_message
-                    ).strip()
-                    assistant_message = re.sub(
-                        r'\*Source:.*?\*',
-                        '',
-                        assistant_message,
-                        flags=re.IGNORECASE
-                    ).strip()
-                    assistant_message = re.sub(
-                        r'\[Calls? .+?\]',
-                        '',
-                        assistant_message,
-                        flags=re.IGNORECASE
-                    ).strip()
-                    while '\n\n\n' in assistant_message:
-                        assistant_message = assistant_message.replace('\n\n\n', '\n\n')
+                    # SCRUB FAKE SYSTEM MARKERS: Remove any fake [SYSTEM: ...] text
+                    assistant_message = re.sub(r'\[SYSTEM:[^\]]+\]', '', assistant_message).strip()
                     
+                    # ERROR RECOVERY: If answer is empty but we have thinking,
+                    # the AI may have put the answer inside <think> tags incorrectly
+                    if not assistant_message.strip() and final_thinking:
+                        print("WARNING: AI put answer inside <think> tags. Attempting recovery...")
+                        # Try to extract answer from after the Synthesizing section
+                        if "**Synthesizing" in final_thinking:
+                            parts = final_thinking.split("**Synthesizing")
+                            if len(parts) > 1:
+                                after_synth = parts[1]
+                                # Remove any remaining section headers
+                                answer = re.sub(r'\*\*[^*]+\*\*', '', after_synth).strip()
+                                if answer:
+                                    assistant_message = answer
+                                    print(f"Recovered answer: {answer[:50]}...")
+                    
+                    # Clean up and add sources
+                    assistant_message = re.sub(r'📚\s*\*\*Sources\*\*.*?(?=\n\n|$)', '', assistant_message, flags=re.DOTALL).strip()
+                    
+                    if sources_used:
+                        sources_text = "\n\n📚 **Sources**\n"
+                        for idx, source in enumerate(sources_used, 1):
+                            sources_text += f"{idx}. [Wikipedia]({source})\n"
+                        assistant_message += sources_text
+                    
+                    # Update conversation history
                     clean_content = remove_thinking_tags(raw_content)
                     conversation_history[channel_id].append({
-                        "role": "assistant", 
-                        "content": clean_content if clean_content else "Acknowledged."
+                        "role": "assistant",
+                        "content": clean_content if clean_content else assistant_message
                     })
+                    
+                    # Send answer
+                    while assistant_message:
+                        await ctx.send(assistant_message[:1990])
+                        assistant_message = assistant_message[1990:]
+                    
                     break
-
+                
                 # Process tool calls
                 tool_results = []
-                
                 for tool_call in tool_calls:
                     fname = tool_call.function.name
-                    try:
-                        fargs = json.loads(tool_call.function.arguments)
-                    except:
-                        fargs = {}
-
-                    tool_result = ""
+                    fargs = json.loads(tool_call.function.arguments)
                     
                     if fname == "search_wikipedia":
                         query = fargs.get('query', '')
                         await update_progress(f"🔍 **Searching Wikipedia...**\n\n> {query}")
                         tool_result = await execute_wiki_search(query)
-
+                        has_done_research = True
                     elif fname == "get_wikipedia_page":
                         title = fargs.get('title', '')
                         await update_progress(f"📖 **Reading Article...**\n\n> {title}")
                         tool_result = await execute_wiki_page(title)
-                        
-                        # Track source
+                        has_done_research = True
                         wiki_url = f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}"
                         if wiki_url not in sources_used:
                             sources_used.append(wiki_url)
-                        
-                        # Track page title for RAG validation
-                        if 'pages_read_tracker' in locals() and RAG_AVAILABLE and RAG_STORE is not None:
-                            pages_read_tracker.append(title)
-                            try:
-                                completeness = RAG_STORE.check_research_completeness(question, pages_read_tracker)
-                                if not completeness['complete']:
-                                    messages.append({
-                                        "role": "system",
-                                        "content": f"⚠️ Research Incomplete: {completeness['reason']}"
-                                    })
-                            except:
-                                pass
-
-                    elif fname == "deploy_html":
-                        html_value = fargs.get('value', '')
-                        await update_progress(f"🌐 **Deploying HTML...**")
-                        tool_result = await execute_deploy_html(html_value)
-
+                    else:
+                        tool_result = "Unknown tool"
+                    
                     tool_results.append({
                         "tool_call_id": tool_call.id,
                         "role": "tool",
                         "name": fname,
                         "content": str(tool_result)
                     })
-
-                # Add assistant message with tool calls to history
-                clean_content = remove_thinking_tags(raw_content)
-                if not clean_content:
-                    if tool_calls:
-                        tool_names = [tc.function.name for tc in tool_calls]
-                        if len(tool_names) == 1:
-                            tool_name = tool_names[0]
-                            if tool_name == "search_wikipedia":
-                                clean_content = "Searching Wikipedia for information."
-                            elif tool_name == "get_wikipedia_page":
-                                clean_content = "Reading Wikipedia article."
-                            elif tool_name == "deploy_html":
-                                clean_content = "Deploying HTML to public URL."
-                            else:
-                                clean_content = f"Calling {tool_name} tool."
-                        else:
-                            clean_content = f"Calling tools: {', '.join(tool_names)}."
-                    else:
-                        clean_content = "Processing request."
-                    
+                
+                # Add to message history
                 messages.append({
                     "role": "assistant",
-                    "content": clean_content,
+                    "content": f"Called {len(tool_calls)} tool(s)",
                     "tool_calls": [
                         {
                             "id": tc.id,
@@ -599,74 +397,18 @@ async def process_question(ctx, question: str):
                         } for tc in tool_calls
                     ]
                 })
-
-                # Add tool results to messages
                 messages.extend(tool_results)
-
-                # After reading Wikipedia articles, prompt AI to think about what was learned
-                last_tool_name = tool_results[-1].get("name", "") if tool_results else ""
-                if last_tool_name == "get_wikipedia_page":
-                    messages.append({
-                        "role": "system",
-                        "content": (
-                            "You just read a Wikipedia article. Now think about:\n"
-                            "1. What information did you learn from this article?\n"
-                            "2. Do you need to read more information to answer the user's question?\n"
-                            "3. If researching a current leader, have you read both their position page AND their bio page?\n\n"
-                            "Think step-by-step in a 基督 block, then either call more tools or provide your answer."
-                        )
-                    })
-                elif last_tool_name == "search_wikipedia":
-                    messages.append({
-                        "role": "system",
-                        "content": (
-                            "You just received search results. Think about:\n"
-                            "1. Which result(s) should you read to answer the user's question?\n"
-                            "2. What's your next step - read a Wikipedia article?\n\n"
-                            "Think step-by-step in a 基督 block, then call get_wikipedia_page or provide your answer."
-                        )
-                    })
-
-            # At max iterations, just extract what we have
+            
+            # Max iterations
             if iteration >= max_iterations:
-                assistant_message = remove_thinking_tags(raw_content)
-
-            # Add sources if any were used
-            if sources_used and assistant_message:
-                sources_text = "\n\n📚 **Sources**\n"
-                for idx, source in enumerate(sources_used, 1):
-                    sources_text += f"{idx}. [Wikipedia]({source})\n"
-                assistant_message += sources_text
-
-            # Send final answer as separate message
-            if assistant_message:
-                final_text = assistant_message.strip()
-                
-                # Send answer as a regular message (not in embed)
-                while final_text:
-                    await ctx.send(final_text[:1990])
-                    final_text = final_text[1990:]
-            else:
-                await ctx.send("I couldn't generate a response. Please try again.")
-
+                await ctx.send("I couldn't complete within the time limit. Please try rephrasing.")
+    
     except Exception as e:
         error_text = f"❌ **Error:** {str(e)}"
-        try:
-            if progress_msg:
-                error_embed = discord.Embed(
-                    title="Reasoning",
-                    description=error_text[:4096],
-                    color=0xED4245
-                )
-                await progress_msg.edit(embed=error_embed)
-            else:
-                await ctx.send(error_text)
-        except:
-            pass
-        
         print(f"Error: {e}")
         import traceback
         traceback.print_exc()
+        await ctx.send(error_text)
 
 
 if __name__ == "__main__":
@@ -674,3 +416,4 @@ if __name__ == "__main__":
         print("ERROR: DISCORD_BOT_TOKEN missing")
         exit(1)
     bot.run(DISCORD_BOT_TOKEN)
+
