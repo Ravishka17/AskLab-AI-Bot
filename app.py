@@ -148,7 +148,7 @@ def remove_thinking_tags(text: str) -> str:
     """Remove <think> tags"""
     if not text:
         return ""
-    return re.sub(r'<think>.*?</think>', '', text, re.DOTALL).strip()
+    return re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
 
 
 def format_blockquote(text: str) -> str:
