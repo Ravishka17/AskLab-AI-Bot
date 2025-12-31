@@ -196,7 +196,7 @@ async def process_question(ctx, question: str):
     if len(conversation_history[channel_id]) > 20:
         conversation_history[channel_id] = conversation_history[channel_id][-20:]
     
-    # System prompt - CRITICAL: Final answer goes AFTER </think> tags
+    # System prompt - ULTRA EXPLICIT INSTRUCTIONS
     system_message = {
         "role": "system",
         "content": (
@@ -205,38 +205,37 @@ async def process_question(ctx, question: str):
             "- Answer questions using training knowledge\n"
             "- Research current information on Wikipedia\n"
             "- Think step-by-step using <think> tags\n\n"
-            "⚠️ MANDATORY REQUIREMENTS:\n"
-            "1. Wrap ALL thinking in <think>...</think> tags\n"
-            "2. Use section headers like **Planning the Research**\n"
-            "3. Let the SYSTEM call tools - don't describe them\n"
-            "4. For current leaders: read position page AND biography\n"
-            "5. FINAL ANSWER GOES **AFTER** </think> TAGS, NOT INSIDE\n\n"
-            "📋 CORRECT FORMAT (Note: Answer is OUTSIDE <think> tags):\n\n"
+            "⚠️ ULTRA CRITICAL - READ CAREFULLY:\n"
+            "1. Wrap ONLY your THINKING in <think>...</think> tags\n"
+            "2. Use section headers like **Planning the Research** INSIDE think tags\n"
+            "3. Let the SYSTEM call tools - DON'T describe "[SYSTEM: calls tools]"\n"
+            "4. For current leaders: search AND read biography (2 pages)\n"
+            "5. AFTER </think> tags, provide FINAL ANSWER (no tags around it)\n"
+            "6. DON'T write fake actions: "[SYSTEM: Shows article]" is WRONG\n"
+            "7. DON'T describe what system does - just THINK and ANSWER\n\n"
+            "✅ CORRECT PATTERN:\n\n"
             "<think>\n"
             "**Planning the Research**\n"
             "I need to find who is current president of Sri Lanka.\n"
             "</think>\n\n"
-            "[SYSTEM: Calls tools automatically]\n\n"
             "<think>\n"
             "**Analyzing Search Results**\n"
             "I see 'President of Sri Lanka' in results. Will read this.\n"
             "</think>\n\n"
-            "[SYSTEM: Shows article content]\n\n"
             "<think>\n"
-            "**Reviewing Information**\n"
+            "**Reviewing Article**\n"
             "Found current president is Anura Kumara Dissanayake. Need bio too.\n"
             "</think>\n\n"
-            "[SYSTEM: Shows biography]\n\n"
             "<think>\n"
-            "**Synthesizing Complete Information**\n"
-            "From both articles: Current president is Anura Kumara Dissanayake, took office Sept 23, 2024, represents NPP coalition, was elected in 2024 election.\n"
+            "**Synthesizing Information**\n"
+            "From both pages: Current president is Anura Kumara Dissanayake, took office Sept 23, 2024, represents NPP coalition.\n"
             "</think>\n\n"
             "The current president of Sri Lanka is Anura Kumara Dissanayake, who took office on September 23, 2024, after winning the 2024 presidential election. He represents the National People's Power (NPP) coalition and is the first Sri Lankan president elected from outside the country's traditional political parties.\n\n"
-            "📚 Sources are added automatically below\n\n"
-            "❌ CRITICAL ERRORS TO AVOID:\n"
-            "- NEVER put answer inside <think>...</think> tags\n"
-            "- NEVER generate fake tool calls: '🔍 Searching > query'\n"
-            "- NEVER put <think> tags around your final answer"
+            "❌ DEADLY ERRORS THAT WILL GET YOU FIRED:\n"
+            "- [SYSTEM: Calls tools] ← WRONG! Don't write this!\n"
+            "- <answer>text</answer> ← WRONG! No tags around final answer!\n"
+            "- **Synthesizing** (in thinking) then **Finalizing...** (more thinking) ← TOO MUCH!\n"
+            "- 🔍 **Searching** > query ← FAKE! Don't generate fake searches!"
         )
     }
     
@@ -312,6 +311,9 @@ async def process_question(ctx, question: str):
                         await update_progress(f"🧠 **Finalizing...**\n\n{format_blockquote(final_thinking)}")
                     
                     assistant_message = remove_thinking_tags(raw_content)
+                    
+                    # SCRUB FAKE SYSTEM MARKERS: Remove any fake [SYSTEM: ...] text
+                    assistant_message = re.sub(r'\[SYSTEM:[^\]]+\]', '', assistant_message).strip()
                     
                     # ERROR RECOVERY: If answer is empty but we have thinking,
                     # the AI may have put the answer inside <think> tags incorrectly
