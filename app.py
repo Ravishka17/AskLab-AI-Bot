@@ -39,7 +39,7 @@ load_dotenv()
 # Configuration
 DISCORD_BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN')
 GROQ_API_KEY = os.getenv('GROQ_API_KEY')
-GROQ_MODEL = os.getenv('GROQ_MODEL', 'llama3-8b-8192')
+GROQ_MODEL = os.getenv('GROQ_MODEL', 'moonshotai/kimi-k2-instruct-0905')
 GROQ_TEMPERATURE = float(os.getenv('GROQ_TEMPERATURE', '0.7'))
 
 # Initialize Groq client
