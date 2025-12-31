@@ -196,7 +196,7 @@ async def process_question(ctx, question: str):
     if len(conversation_history[channel_id]) > 20:
         conversation_history[channel_id] = conversation_history[channel_id][-20:]
     
-    # System prompt
+    # System prompt - CRITICAL: Final answer goes AFTER </think> tags
     system_message = {
         "role": "system",
         "content": (
@@ -209,25 +209,34 @@ async def process_question(ctx, question: str):
             "1. Wrap ALL thinking in <think>...</think> tags\n"
             "2. Use section headers like **Planning the Research**\n"
             "3. Let the SYSTEM call tools - don't describe them\n"
-            "4. For current leaders: read position page AND biography\n\n"
-            "📋 EXACT FORMAT:\n\n"
+            "4. For current leaders: read position page AND biography\n"
+            "5. FINAL ANSWER GOES **AFTER** </think> TAGS, NOT INSIDE\n\n"
+            "📋 CORRECT FORMAT (Note: Answer is OUTSIDE <think> tags):\n\n"
             "<think>\n"
             "**Planning the Research**\n"
             "I need to find who is current president of Sri Lanka.\n"
             "</think>\n\n"
+            "[SYSTEM: Calls tools automatically]\n\n"
             "<think>\n"
             "**Analyzing Search Results**\n"
             "I see 'President of Sri Lanka' in results. Will read this.\n"
             "</think>\n\n"
+            "[SYSTEM: Shows article content]\n\n"
             "<think>\n"
             "**Reviewing Information**\n"
             "Found current president is Anura Kumara Dissanayake. Need bio too.\n"
             "</think>\n\n"
+            "[SYSTEM: Shows biography]\n\n"
             "<think>\n"
             "**Synthesizing Complete Information**\n"
-            "From both sources: Current president is Anura Kumara Dissanayake.\n"
+            "From both articles: Current president is Anura Kumara Dissanayake, took office Sept 23, 2024, represents NPP coalition, was elected in 2024 election.\n"
             "</think>\n\n"
-            "❌ NEVER generate fake tool results like '🔍 Searching > query'"
+            "The current president of Sri Lanka is Anura Kumara Dissanayake, who took office on September 23, 2024, after winning the 2024 presidential election. He represents the National People's Power (NPP) coalition and is the first Sri Lankan president elected from outside the country's traditional political parties.\n\n"
+            "📚 Sources are added automatically below\n\n"
+            "❌ CRITICAL ERRORS TO AVOID:\n"
+            "- NEVER put answer inside <think>...</think> tags\n"
+            "- NEVER generate fake tool calls: '🔍 Searching > query'\n"
+            "- NEVER put <think> tags around your final answer"
         )
     }
     
@@ -303,6 +312,21 @@ async def process_question(ctx, question: str):
                         await update_progress(f"🧠 **Finalizing...**\n\n{format_blockquote(final_thinking)}")
                     
                     assistant_message = remove_thinking_tags(raw_content)
+                    
+                    # ERROR RECOVERY: If answer is empty but we have thinking,
+                    # the AI may have put the answer inside <think> tags incorrectly
+                    if not assistant_message.strip() and final_thinking:
+                        print("WARNING: AI put answer inside <think> tags. Attempting recovery...")
+                        # Try to extract answer from after the Synthesizing section
+                        if "**Synthesizing" in final_thinking:
+                            parts = final_thinking.split("**Synthesizing")
+                            if len(parts) > 1:
+                                after_synth = parts[1]
+                                # Remove any remaining section headers
+                                answer = re.sub(r'\*\*[^*]+\*\*', '', after_synth).strip()
+                                if answer:
+                                    assistant_message = answer
+                                    print(f"Recovered answer: {answer[:50]}...")
                     
                     # Clean up and add sources
                     assistant_message = re.sub(r'📚\s*\*\*Sources\*\*.*?(?=\n\n|$)', '', assistant_message, flags=re.DOTALL).strip()
