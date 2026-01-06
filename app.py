@@ -1,676 +1,978 @@
 #!/usr/bin/env python3
-"""
-Main entry point for AskLab AI Discord Bot on fps.ms.
-This file is the required entry point for fps.ms container hosting.
-"""
-
 import os
-import sys
-
-# Ensure the project root is in sys.path
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
-
-# Import RAG examples module for few-shot prompting
-RAG_AVAILABLE = False
-RAG_STORE = None
-try:
-    from rag_examples import RAGExampleStore
-    RAG_STORE = RAGExampleStore()
-    RAG_AVAILABLE = True
-    print("✓ RAG examples module loaded successfully")
-except ImportError as e:
-    print(f"Info: RAG examples module not available ({e})")
-
-# Import bot modules
 import json
 import re
-from typing import List
-import discord
+import asyncio
 import aiohttp
+import discord
 from discord.ext import commands
+from discord import app_commands
 from groq import Groq
 from dotenv import load_dotenv
+from datetime import datetime
+import requests
 
-# Load environment variables
 load_dotenv()
 
-# Configuration
+# --- CONFIGURATION ---
 DISCORD_BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN')
 GROQ_API_KEY = os.getenv('GROQ_API_KEY')
-GROQ_MODEL = os.getenv('GROQ_MODEL', 'llama3-8b-8192')
-GROQ_TEMPERATURE = float(os.getenv('GROQ_TEMPERATURE', '0.7'))
+SUPERMEMORY_API_KEY = os.getenv('SUPERMEMORY_API_KEY')
 
-# Initialize Groq client
 groq_client = Groq(api_key=GROQ_API_KEY)
-
-# Initialize bot
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 conversation_history = {}
+user_model_preferences = {}
+WIKI_HEADERS = {"User-Agent": "AskLabBot/2.0 (contact: admin@asklab.ai) aiohttp/3.8"}
 
-# --- TOOLS ---
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "search_wikipedia",
-            "description": "Search Wikipedia for information.",
-            "parameters": {
-                "type": "object",
-                "properties": {"query": {"type": "string", "description": "Search query for Wikipedia"}},
-                "required": ["query"]
+# Available models
+AVAILABLE_MODELS = {
+    "Llama 3.3 70B": "llama-3.3-70b-versatile",
+    "Kimi K2 Instruct": "moonshotai/kimi-k2-instruct-0905"
+}
+
+# --- SUPERMEMORY CLIENT ---
+class SupermemoryClient:
+    def __init__(self, api_key):
+        self.enabled = False
+        self.api_key = api_key
+        self.base_url = "https://api.supermemory.ai"
+        
+        if not api_key:
+            print("⚠️ SUPERMEMORY_API_KEY not set")
+            return
+        
+        self.enabled = True
+        print("✅ Supermemory client initialized")
+    
+    async def test_connection(self):
+        """Test if Supermemory connection works."""
+        if not self.enabled:
+            return False
+        
+        try:
+            loop = asyncio.get_event_loop()
+            
+            response = await loop.run_in_executor(
+                None,
+                lambda: requests.post(
+                    f"{self.base_url}/v4/search",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json={"q": "test", "limit": 1}
+                )
+            )
+            
+            if response.status_code == 200:
+                print(f"✅ Supermemory connection successful")
+                return True
+            else:
+                print(f"❌ Supermemory test failed: {response.status_code}")
+                return False
+        except Exception as e:
+            print(f"❌ Supermemory test failed: {e}")
+            self.enabled = False
+            return False
+    
+    async def add_memory(self, content, container_tag, metadata=None):
+        """Add a memory to Supermemory using the v3/documents endpoint."""
+        if not self.enabled:
+            return None
+        
+        try:
+            loop = asyncio.get_event_loop()
+            
+            # Prepare payload according to API documentation
+            payload = {
+                "content": content,
+                "containerTag": container_tag  # Using singular containerTag
+            }
+            
+            # Add optional metadata
+            if metadata:
+                payload["metadata"] = metadata
+            
+            # Make API request
+            response = await loop.run_in_executor(
+                None,
+                lambda: requests.post(
+                    f"{self.base_url}/v3/documents",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json=payload
+                )
+            )
+            
+            if response.status_code in [200, 201]:
+                print(f"✅ Memory saved: {content[:50]}...")
+                return response.json()
+            else:
+                print(f"❌ Supermemory add failed: {response.status_code} - {response.text}")
+                return None
+        except Exception as e:
+            print(f"❌ Supermemory add error: {e}")
+            return None
+    
+    async def search_memory(self, query, container_tag, limit=5):
+        """Search memories using the v4/search endpoint with hybrid mode."""
+        if not self.enabled:
+            return []
+        
+        try:
+            loop = asyncio.get_event_loop()
+            
+            # Prepare search payload
+            payload = {
+                "q": query,
+                "limit": limit,
+                "containerTag": container_tag,  # Singular for v4/search
+                "searchMode": "hybrid",  # Search both memories and chunks
+                "threshold": 0.6,  # Balanced relevance
+                "rerank": False,  # Skip for speed
+                "rewriteQuery": False  # Skip for speed
+            }
+            
+            # Make API request
+            response = await loop.run_in_executor(
+                None,
+                lambda: requests.post(
+                    f"{self.base_url}/v4/search",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json=payload
+                )
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                # Extract results from response
+                results = data.get('results', [])
+                print(f"🔍 Memory search found {len(results)} results for '{query}'")
+                return results
+            else:
+                print(f"❌ Supermemory search failed: {response.status_code}")
+                return []
+        except Exception as e:
+            print(f"❌ Supermemory search error: {e}")
+            return []
+    
+    async def get_profile(self, container_tag, query=None):
+        """Get user profile using the v4/profile endpoint."""
+        if not self.enabled:
+            return None
+        
+        try:
+            loop = asyncio.get_event_loop()
+            
+            # Prepare profile payload
+            payload = {
+                "containerTag": container_tag
+            }
+            
+            # Add optional search query
+            if query:
+                payload["q"] = query
+            
+            # Make API request
+            response = await loop.run_in_executor(
+                None,
+                lambda: requests.post(
+                    f"{self.base_url}/v4/profile",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json=payload
+                )
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                print(f"✅ Profile retrieved for {container_tag}")
+                return data
+            else:
+                print(f"❌ Profile retrieval failed: {response.status_code}")
+                return None
+        except Exception as e:
+            print(f"❌ Profile retrieval error: {e}")
+            return None
+
+# Initialize Supermemory client
+supermemory = SupermemoryClient(SUPERMEMORY_API_KEY) if SUPERMEMORY_API_KEY else None
+
+# --- TOOL DEFINITIONS ---
+def get_tools(include_memory=False):
+    """Get tool definitions, optionally including memory search."""
+    base_tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "search_wikipedia",
+                "description": "Search Wikipedia for article titles matching a query. Returns a list of titles and snippets.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string", "description": "The search query"}},
+                    "required": ["query"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_wikipedia_page",
+                "description": "Retrieve the full text content of a Wikipedia page by exact title.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"title": {"type": "string", "description": "The exact Wikipedia page title"}},
+                    "required": ["title"]
+                }
             }
         }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_wikipedia_page",
-            "description": "Read the full content of a Wikipedia article.",
-            "parameters": {
-                "type": "object",
-                "properties": {"title": {"type": "string", "description": "Exact Wikipedia article title to read"}},
-                "required": ["title"]
+    ]
+    
+    if include_memory:
+        base_tools.append({
+            "type": "function",
+            "function": {
+                "name": "search_memory",
+                "description": "Search past conversations and research results from your memory.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "What to search for in memory (e.g., 'python tutorial', 'last week discussion')"
+                        }
+                    },
+                    "required": ["query"]
+                }
             }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "deploy_html",
-            "description": "Deploy HTML code to a public URL.",
-            "parameters": {
-                "type": "object",
-                "properties": {"value": {"type": "string", "description": "HTML code to deploy"}},
-                "required": ["value"]
-            }
-        }
-    }
-]
+        })
+    
+    return base_tools
 
-
-# --- WIKIPEDIA FUNCTIONS ---
-
-async def execute_wiki_search(query: str) -> str:
-    """Execute Wikipedia search using the official API"""
+# --- WIKIPEDIA LOGIC ---
+async def fetch_wiki(params, retries=3):
+    """Fetch data from Wikipedia API with retries."""
     url = "https://en.wikipedia.org/w/api.php"
-    params = {
+    params.update({"format": "json", "utf8": "1"})
+    
+    for attempt in range(retries):
+        try:
+            async with aiohttp.ClientSession(headers=WIKI_HEADERS) as session:
+                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    if resp.status == 200:
+                        return await resp.json()
+                    elif attempt < retries - 1:
+                        await asyncio.sleep(1 * (attempt + 1))
+        except (asyncio.TimeoutError, Exception) as e:
+            if attempt == retries - 1:
+                print(f"Error fetching Wikipedia: {e}")
+            elif attempt < retries - 1:
+                await asyncio.sleep(1 * (attempt + 1))
+    
+    return {"error": "Failed after maximum retries"}
+
+async def search_wikipedia(query):
+    """Search Wikipedia for articles."""
+    data = await fetch_wiki({
         "action": "query",
         "list": "search",
         "srsearch": query,
-        "format": "json",
-        "utf8": True,
-        "limit": 10
-    }
-    headers = {
-        "User-Agent": "AskLab-AI-Bot/1.0 (Discord Bot)"
-    }
+        "srlimit": "5"
+    })
     
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params, headers=headers) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    results = []
-                    for item in data.get('query', {}).get('search', []):
-                        snippet = item['snippet'].replace('<span class="searchmatch">', '').replace('</span>', '')
-                        results.append(f"- {item['title']}: {snippet}")
-                    return "\n".join(results) if results else "No results found."
-                return f"Error: Wikipedia API returned status {response.status}"
-    except Exception as e:
-        return f"Error searching Wikipedia: {str(e)}"
+    if not data or "error" in data:
+        return f"Search failed: {data.get('error', 'Unknown error')}"
+    
+    items = data.get('query', {}).get('search', [])
+    if not items:
+        return "No results found. Try different search terms."
+    
+    results = []
+    for i in items:
+        title = i['title']
+        snippet = re.sub(r'<[^>]+>', '', i.get('snippet', ''))
+        results.append(f"• {title}: {snippet[:150]}")
+    
+    return "\n".join(results)
 
-
-async def execute_wiki_page(title: str) -> str:
-    """Execute Wikipedia page read using the official API"""
-    url = "https://en.wikipedia.org/w/api.php"
-    params = {
+async def get_wikipedia_page(title):
+    """Retrieve full text of a Wikipedia page."""
+    data = await fetch_wiki({
         "action": "query",
         "prop": "extracts",
-        "explaintext": True,
+        "explaintext": "1",
+        "exintro": "0",
         "titles": title,
-        "format": "json",
-        "utf8": True,
-        "redirects": True
-    }
-    headers = {
-        "User-Agent": "AskLab-AI-Bot/1.0 (Discord Bot)"
-    }
+        "redirects": "1"
+    })
     
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params, headers=headers) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    pages = data.get('query', {}).get('pages', {})
-                    for page_id, page_content in pages.items():
-                        if page_id != '-1':
-                            extract = page_content.get('extract', '')
-                            if len(extract) > 3000:
-                                return extract[:3000] + "... (truncated)"
-                            return extract if extract else "No content available."
-                    return "Page not found."
-                return f"Error: Wikipedia API returned status {response.status}"
-    except Exception as e:
-        return f"Error reading Wikipedia page: {str(e)}"
+    if not data or "error" in data:
+        return f"Failed to retrieve page: {data.get('error', 'Network error')}"
+    
+    pages = data.get('query', {}).get('pages', {})
+    if not pages:
+        return f"No page data returned for '{title}'."
+    
+    for p_id, p_val in pages.items():
+        if p_id == '-1':
+            return f"Page '{title}' not found."
+        
+        extract = p_val.get('extract', '').strip()
+        if not extract:
+            data2 = await fetch_wiki({
+                "action": "query",
+                "prop": "extracts",
+                "explaintext": "1",
+                "exintro": "1",
+                "titles": title,
+                "redirects": "1"
+            })
+            
+            if data2 and "query" in data2:
+                pages2 = data2.get('query', {}).get('pages', {})
+                for p_id2, p_val2 in pages2.items():
+                    extract2 = p_val2.get('extract', '').strip()
+                    if extract2:
+                        return extract2[:3000]
+            
+            return f"Page '{title}' exists but has no readable text content."
+        
+        return extract[:3500]
+    
+    return "Unable to parse Wikipedia response."
 
-
-async def execute_deploy_html(value: str) -> str:
-    """Deploy HTML using EdgeOne Pages MCP"""
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post("http://localhost:3001/deploy", json={"value": value}) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    return data.get('url', 'Deployment successful but no URL returned')
-                return f"Error: Deploy returned status {response.status}"
-    except Exception as e:
-        return f"Error deploying HTML: {str(e)}"
-
-
-# --- HELPER FUNCTIONS ---
-
-def extract_thinking(text):
-    """Extract content between <function_call> tags ONLY"""
-    if not text:
-        return None
-    pattern = r'</minimax:tool_call>([^<]+)</func_call>'
-    matches = re.findall(pattern, text, flags=re.DOTALL | re.IGNORECASE)
-    return matches[-1].strip() if matches else None
-
-def remove_thinking_tags(text):
-    """Remove thinking tags from text"""
+# --- TEXT PROCESSING ---
+def extract_reasoning(text):
+    """Extracts text inside <think> tags."""
     if not text:
         return ""
-    return re.sub(r'基督.*?基督', '', text, flags=re.DOTALL | re.IGNORECASE).strip()
+    match = re.search(r'<(?:think|thinking)>(.*?)</(?:think|thinking)>', text, re.DOTALL | re.IGNORECASE)
+    return match.group(1).strip() if match else ""
 
-def format_blockquote(text: str) -> str:
-    """Format text as blockquote with clean structure"""
+def parse_thinking_with_header(think_text):
+    """Parses thinking text to extract header and body."""
+    if not think_text:
+        return None, None
+    
+    match = re.match(r'\*\*([^*]+)\*\*\s*(.*)', think_text, re.DOTALL)
+    if match:
+        header = match.group(1).strip()
+        body = match.group(2).strip()
+        return header, body
+    
+    return None, think_text
+
+def clean_output(text):
+    """Removes thinking tags and hallucinated tool calls from final output."""
     if not text:
         return ""
     
-    lines = text.strip().splitlines()
-    formatted = []
+    text = re.sub(r'<(?:think|thinking)>.*?</(?:think|thinking)>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<function_calls?>.*?</function_calls?>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<function_call>.*?</function_call>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<function=.*?</function>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<invoke.*?</invoke>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<result>.*?</result>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<parameter.*?</parameter>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'\n\n(?:search_wikipedia|get_wikipedia_page|search_memory)\([^)]+\)', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'I\'ll (?:search|get|fetch|retrieve)[^\n]*\.', '', text, flags=re.IGNORECASE)
     
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        elif line.startswith("**") and line.endswith("**"):
-            if formatted:
-                formatted.append("")
-            formatted.append(f"> {line}")
+    return text.strip()
+
+def convert_to_past_tense(sections):
+    """Convert action verbs to past tense in completed reasoning."""
+    converted = []
+    for section in sections:
+        section = section.replace("**Searching Wikipedia...**", "**Searched Wikipedia**")
+        section = section.replace("**Reading Article...**", "**Read Article**")
+        section = section.replace("**Searching Memory...**", "**Searched Memory**")
+        section = section.replace("**Thinking...**", "**Thought**")
+        section = section.replace("**Skipping Duplicate**", "**Skipped Duplicate**")
+        converted.append(section)
+    return converted
+
+# --- SYSTEM PROMPTS ---
+def get_system_prompt(model_name, has_memory=False):
+    """Get model-specific system prompt."""
+    memory_instruction = ""
+    if has_memory:
+        memory_instruction = (
+            "\n### MEMORY SYSTEM\n"
+            "You have access to search_memory tool to recall past conversations and research.\n"
+            "Use it when:\n"
+            "- User asks 'what did we discuss about X?'\n"
+            "- User references 'last time' or 'before'\n"
+            "- Context from previous conversations would be helpful\n\n"
+        )
+    
+    base_prompt = (
+        "You are AskLab AI, a research assistant. Current Date: January 2026.\n\n"
+        "### RESPONSE TYPES\n"
+        "1. **Simple conversations**: Respond directly without tools\n"
+        "2. **Research queries**: Use the research workflow\n"
+        + memory_instruction
+    )
+    
+    if "llama" in model_name.lower():
+        return base_prompt + (
+            "### RESEARCH WORKFLOW\n"
+            "1. <think>**Planning**\nStrategy</think>\n"
+            "2. Call search_wikipedia (NO THINKING)\n"
+            "3. <think>List 2-3 pages as links</think>\n"
+            "4. Call get_wikipedia_page (NO THINKING)\n"
+            "5. <think>Summarize facts</think>\n"
+            "6. Repeat for more pages\n"
+            "7. <think>Synthesize findings</think>\n"
+            "8. Final answer with citations\n\n"
+            "### CRITICAL RULES\n"
+            "- ONE ACTION PER RESPONSE: thinking OR tool, NEVER BOTH\n"
+            "- Keep thinking under 400 chars\n"
+            "- Read at least 3 pages\n"
+        )
+    else:
+        return base_prompt + (
+            "### RESEARCH WORKFLOW\n"
+            "1. <think>**Planning**\nStrategy</think>\n"
+            "2. Call search_wikipedia\n"
+            "3. <think>List 2-3 pages as links</think>\n"
+            "4. Call get_wikipedia_page\n"
+            "5. <think>Summarize information</think>\n"
+            "6. Read more pages (at least 3 total)\n"
+            "7. <think>Synthesize ALL information</think>\n"
+            "8. Final answer with citations [1](URL)\n\n"
+            "### CRITICAL RULES\n"
+            "- List pages as: [Title](URL)\n"
+            "- Cite inline like [1](URL)\n"
+            "- Keep thinking under 600 chars\n"
+            "- Read at least 3 pages\n"
+        )
+
+# --- MODEL SELECTION VIEW ---
+class ModelSelectView(discord.ui.View):
+    def __init__(self, user_id):
+        super().__init__(timeout=60)
+        self.user_id = user_id
+        self.add_item(ModelDropdown(user_id))
+
+class ModelDropdown(discord.ui.Select):
+    def __init__(self, user_id):
+        options = [
+            discord.SelectOption(
+                label="Llama 3.3 70B",
+                description="Fast and versatile",
+                value="llama-3.3-70b-versatile",
+                emoji="🦙"
+            ),
+            discord.SelectOption(
+                label="Kimi K2 Instruct",
+                description="Precise reasoning",
+                value="moonshotai/kimi-k2-instruct-0905",
+                emoji="🌙"
+            )
+        ]
+        super().__init__(
+            placeholder="Choose AI model...",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+        self.user_id = user_id
+    
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This menu is not for you!", ephemeral=True)
+            return
+        
+        selected_model = self.values[0]
+        user_model_preferences[self.user_id] = selected_model
+        
+        model_names = {v: k for k, v in AVAILABLE_MODELS.items()}
+        model_display = model_names.get(selected_model, selected_model)
+        
+        await interaction.response.send_message(
+            f"✅ Model switched to **{model_display}**",
+            ephemeral=True
+        )
+
+# --- SLASH COMMANDS ---
+@bot.tree.command(name="model", description="Select AI model")
+async def select_model(interaction: discord.Interaction):
+    view = ModelSelectView(interaction.user.id)
+    current_model = user_model_preferences.get(interaction.user.id, "moonshotai/kimi-k2-instruct-0905")
+    model_names = {v: k for k, v in AVAILABLE_MODELS.items()}
+    current_display = model_names.get(current_model, current_model)
+    
+    await interaction.response.send_message(
+        f"Current model: **{current_display}**\nSelect a new model:",
+        view=view,
+        ephemeral=True
+    )
+
+@bot.tree.command(name="memory_stats", description="Check Supermemory status")
+async def memory_stats(interaction: discord.Interaction):
+    if not supermemory or not supermemory.enabled:
+        await interaction.response.send_message(
+            "🧠 **Supermemory**: Disabled\n\nTo enable:\n1. Set `SUPERMEMORY_API_KEY` in .env\n2. Restart bot",
+            ephemeral=True
+        )
+    else:
+        # Get user profile to show stats
+        user_id = str(interaction.user.id)
+        profile_data = await supermemory.get_profile(user_id)
+        
+        if profile_data:
+            profile = profile_data.get('profile', {})
+            static_facts = profile.get('static', [])
+            dynamic_context = profile.get('dynamic', [])
+            
+            stats_msg = (
+                f"🧠 **Supermemory**: ✅ Enabled\n\n"
+                f"**Your Profile:**\n"
+                f"📌 Static Facts: {len(static_facts)}\n"
+                f"🔄 Dynamic Context: {len(dynamic_context)}\n\n"
+                f"Your conversations are being saved for future reference."
+            )
         else:
-            formatted.append(f"> {line}")
-    
-    return "\n".join(formatted)
-
+            stats_msg = (
+                "🧠 **Supermemory**: ✅ Enabled\n\n"
+                "Your conversations are being saved for future reference."
+            )
+        
+        await interaction.response.send_message(stats_msg, ephemeral=True)
 
 @bot.event
 async def on_ready():
-    print(f'{bot.user} has connected to Discord!')
-    print('✅ Wikipedia System: Online')
+    print(f'✅ Bot Online: {bot.user}')
+    
+    if supermemory and supermemory.enabled:
+        test_result = await supermemory.test_connection()
+        if test_result:
+            print(f'🧠 Supermemory: ✅ Connected')
+        else:
+            print(f'🧠 Supermemory: ❌ Connection failed')
+    else:
+        print(f'🧠 Supermemory: ⚠️ Disabled (set SUPERMEMORY_API_KEY in .env)')
+    
+    try:
+        synced = await bot.tree.sync()
+        print(f'✅ Synced {len(synced)} command(s)')
+    except Exception as e:
+        print(f'❌ Failed to sync commands: {e}')
 
 @bot.event
 async def on_message(message):
     if message.author == bot.user:
         return
     if bot.user in message.mentions:
-        question = message.content.replace(f'<@{bot.user.id}>', '').strip()
-        if question:
-            class MessageContext:
-                def __init__(self, message):
-                    self.channel = message.channel
-                    self.send = message.channel.send
-                    self.author = message.author
-                    self.typing = message.channel.typing
-            ctx = MessageContext(message)
-            await process_question(ctx, question)
-        return
-    await bot.process_commands(message)
+        prompt = message.content.replace(f'<@{bot.user.id}>', '').strip()
+        if prompt:
+            user_id = message.author.id
+            selected_model = user_model_preferences.get(user_id, "moonshotai/kimi-k2-instruct-0905")
+            await run_research(message.channel, prompt, selected_model, user_id)
 
-
-async def process_question(ctx, question: str):
-    channel_id = ctx.channel.id
+async def run_research(channel, prompt, model_name, user_id):
+    cid = channel.id
+    container_tag = str(user_id)  # Using user_id as container tag
     
-    if channel_id not in conversation_history:
-        conversation_history[channel_id] = []
+    if cid not in conversation_history:
+        conversation_history[cid] = []
     
-    conversation_history[channel_id].append({"role": "user", "content": question})
-    
-    if len(conversation_history[channel_id]) > 20:
-        conversation_history[channel_id] = conversation_history[channel_id][-20:]
-
-    system_message = {
-        "role": "system",
-        "content": (
-            "You are AskLab AI - a helpful reasoning assistant with Wikipedia research capabilities.\n\n"
-            "🎯 YOUR CORE CAPABILITIES:\n"
-            "- Answer questions using your training knowledge (up to January 2025)\n"
-            "- Research current information on Wikipedia when needed\n"
-            "- Think step-by-step using </minimax:tool_call>...</func_call> tags\n\n"
-            "⚠️ MANDATORY REQUIREMENT:\n"
-            "You MUST write your thinking inside <function_call>...</think> tags. This is non-negotiable.\n"
-            "- Think BEFORE calling tools to plan your research\n"
-            "- Think AFTER reading articles to analyze what you learned\n"
-            "- Never respond without thinking in 基督 tags\n\n"
+    # Get user profile and search memory if Supermemory is enabled
+    context_from_memory = ""
+    if supermemory and supermemory.enabled:
+        # Get profile with search in one call
+        profile_data = await supermemory.get_profile(container_tag, query=prompt)
+        
+        if profile_data:
+            profile = profile_data.get('profile', {})
+            static_facts = profile.get('static', [])
+            dynamic_context = profile.get('dynamic', [])
             
-            "⚙️ WHEN TO USE WIKIPEDIA TOOLS:\n"
-            "MANDATORY: You MUST use Wikipedia tools for:\n"
-            "1. Questions about current presidents, prime ministers, or world leaders\n"
-            "2. Questions about current events, positions, or status (especially after 2023)\n"
-            "3. Any topic where current information may have changed since your training\n\n"
-            
-            "⚠️ CRITICAL: Do NOT rely on your training knowledge for current information!\n"
-            "- For current presidents/leaders: You MUST call search_wikipedia FIRST\n"
-            "- Your thinking MUST show the actual search and reading process\n"
-            "- The ONLY way to get current information is by calling the tools\n"
-            "- NEVER say 'From the Wikipedia page' before actually calling the tools\n\n"
-            
-            "⏰ WHEN TO PROVIDE THE FINAL ANSWER:\n"
-            "- After you have read ALL necessary Wikipedia sources\n"
-            "- After you have gathered comprehensive information\n"
-            "- Once you say 'Synthesizing the Information', that should be your LAST thinking block before the answer\n"
-            "- The pattern should be: Research → Synthesize → ANSWER\n\n"
-            
-            "🧠 THINKING PROCESS - HOW TO USE 主席TION TAGS:\n"
-            "You MUST wrap ALL your thinking in 基督...基督 tags.\n"
-            "Example:\n\n"
-            "基督\n"
-            "**Understanding the Request**\n"
-            "The user wants to know who is the current president of Sri Lanka.\n"
-            "**Planning My Approach**\n"
-            "I need to search Wikipedia to get current information.\n"
-            "基督\n\n"
-            "🔍 **Searching Wikipedia...**\n\n"
-            "> current president of Sri Lanka\n\n"
-            "Then you see the search results.\n\n"
-            "You MUST include 基督 tags around your thinking - NOT as plain text!\n\n"
-            
-            "For research questions about current world leaders:\n\n"
-            "基督\n"
-            "**Understanding the Request**\n"
-            "User wants to know who is currently serving as president of Sri Lanka.\n"
-            "**Planning My Approach**\n"
-            "Since my training data has a cutoff date, I need to search Wikipedia to get the latest information.\n"
-            "基督\n\n"
-            "🔍 **Searching Wikipedia...**\n\n"
-            "> current president of Sri Lanka\n\n"
-            "Then you see the search results.\n\n"
-            "基督\n"
-            "**Analyzing the Results**\n"
-            "I see search results that include 'President of Sri Lanka' which should have current information.\n"
-            "**Planning the Next Step**\n"
-            "I'll call get_wikipedia_page to read the 'President of Sri Lanka' article.\n"
-            "基督\n\n"
-            "📖 **Reading Article...**\n\n"
-            "> President of Sri Lanka\n\n"
-            "Then you see the article content.\n\n"
-            "基督\n"
-            "**Analyzing What I Learned**\n"
-            "I found out that the current president of Sri Lanka is Anura Kumara Dissanayake.\n"
-            "**Planning the Next Step**\n"
-            "I'll search for 'Anura Kumara Dissanayake' on Wikipedia to read his bio page.\n"
-            "基督\n\n"
-            "🔍 **Searching Wikipedia...**\n\n"
-            "> Anura Kumara Dissanayake\n\n"
-            "Then you see the search result.\n\n"
-            "基督\n"
-            "**Analyzing the Results**\n"
-            "I found the 'Anura Kumara Dissanayake' article.\n"
-            "**Planning the Next Step**\n"
-            "Let me read this article to find more information about him.\n"
-            "基督\n\n"
-            "📖 **Reading Article...**\n\n"
-            "> Anura Kumara Dissanayake\n\n"
-            "Then you see the article content.\n\n"
-            "基督\n"
-            "**Synthesizing the Information**\n"
-            "I've found comprehensive information about the current president of Sri Lanka from both Wikipedia pages.\n"
-            "**Preparing the Answer**\n"
-            "Now I can provide a complete answer.\n"
-            "基督\n\n"
-            "The current president of Sri Lanka is Anura Kumara Dissanayake (commonly known as AKD), who assumed office on September 23, 2024, after winning the 2024 presidential election.\n\n"
-            "[Sources automatically added by system]\n\n"
-            
-            "⚠️ CRITICAL RULES:\n"
-            "- MANDATORY: Every thinking block MUST be wrapped in 基督...基督 tags\n"
-            "- MANDATORY: Think BEFORE calling your first function\n"
-            "- For questions about current leaders: Search, read position page, read person's bio (MUST do both!)\n"
-            "- NEVER stop after reading just the position page - also read the person's bio\n"
-            "- If you only read one page, your answer is incomplete - keep researching\n"
-            "- Always gather comprehensive information before answering\n"
-            "- Use **bold** for section headers inside thinking blocks\n"
-            "- Do NOT manually add a Sources section - it's added automatically\n"
-            "- If you see tool results, you successfully called them. If not, you FAILED to call them.\n\n"
-            
-            "Remember: Think in 基督 tags, then either call functions OR provide your answer!"
-        )
-    }
-
-    # Add RAG-based few-shot examples to system message
-    pages_read_tracker = []
-    if RAG_AVAILABLE and RAG_STORE is not None:
-        try:
-            rag_additions = RAG_STORE.get_system_prompt_additions(question)
-            if rag_additions:
-                system_message["content"] += rag_additions
-                print(f"📚 Added RAG examples for: {question[:50]}...")
-        except Exception as e:
-            print(f"Warning: Failed to retrieve RAG examples: {e}")
-
-    progress_msg = None
-    sources_used = []
-
-    try:
-        async with ctx.typing():
-            messages = [system_message] + conversation_history[channel_id]
-            max_iterations = 15
-            iteration = 0
-            assistant_message = ""
-            progress_entries: List[str] = []
-            
-            reasoning_embed = discord.Embed(
-                title="Reasoning",
-                description="🤔 **Processing...**",
-                color=0x5865F2
-            )
-            progress_msg = await ctx.send(embed=reasoning_embed)
-
-            async def update_progress(entry: str) -> None:
-                nonlocal progress_entries, progress_msg, reasoning_embed
-                if not progress_msg:
-                    return
-                entry = (entry or "").strip()
-                if not entry:
-                    return
-                progress_entries.append(entry)
-                content = "\n\n".join(progress_entries)
-                try:
-                    reasoning_embed.description = content[:4096]
-                    await progress_msg.edit(embed=reasoning_embed)
-                except:
-                    pass
-
-            while iteration < max_iterations:
-                iteration += 1
-
-                try:
-                    response = groq_client.chat.completions.create(
-                        model=GROQ_MODEL,
-                        messages=messages,
-                        tools=TOOLS,
-                        tool_choice="auto",
-                        temperature=GROQ_TEMPERATURE,
-                        max_tokens=2000
-                    )
-                except Exception as api_error:
-                    print(f"API Error on iteration {iteration}: {api_error}")
-                    if iteration <= 2:
-                        await update_progress("⚠️ Retrying...")
-                        import asyncio
-                        await asyncio.sleep(1)
-                        try:
-                            response = groq_client.chat.completions.create(
-                                model=GROQ_MODEL,
-                                messages=messages,
-                                tools=TOOLS,
-                                tool_choice="auto",
-                                temperature=GROQ_TEMPERATURE,
-                                max_tokens=2000
-                            )
-                        except:
-                            if iteration == 1:
-                                raise api_error
-                            assistant_message = "I encountered an issue while researching. Please try again."
-                            break
-                    else:
-                        raise api_error
-
-                response_msg = response.choices[0].message
-                raw_content = response_msg.content or ""
-                tool_calls = response_msg.tool_calls or []
-
-                # Extract and display thinking ONLY from 基督 tags
-                thinking = extract_thinking(raw_content)
-                if thinking:
-                    has_headers = bool(re.search(r'\*\*[A-Z][^*]+\*\*', thinking))
-                    if not has_headers:
-                        messages.append({
-                            "role": "system",
-                            "content": "Your thinking blocks must include bold section headers like **Planning the Research**. Reformat your thinking with proper headers."
-                        })
-                        continue
-                    await update_progress(f"🧠 **Thinking...**\n\n{format_blockquote(thinking)}")
-                else:
-                    # No thinking in 基督 tags - this is a violation
-                    # Plain text thinking is NOT acceptable
-                    if iteration <= 2:
-                        messages.append({
-                            "role": "system",
-                            "content": "❌ VIOLATION: You wrote thinking as PLAIN TEXT instead of using 基督...基督 tags.\n\n"
-                            "Your response was rejected because:\n"
-                            "1. Thinking MUST be wrapped in 基督...基督 tags\n"
-                            "2. Writing thinking as plain text is NOT allowed\n"
-                            "3. Do NOT call any tools until you have written proper thinking in 基督 tags\n\n"
-                            "Start over. Write your thinking INSIDE 基督 tags, then call tools."
-                        })
-                        continue
-                    else:
-                        # Force thinking on later iterations
-                        assistant_message = "I couldn't generate a proper response. Please try again."
-                        break
-
-                if not tool_calls:
-                    # No tool calls - this is the final answer
-                    final_thinking = extract_thinking(raw_content)
-                    if final_thinking:
-                        await update_progress(f"🧠 **Thinking...**\n\n{format_blockquote(final_thinking)}")
-                    
-                    assistant_message = remove_thinking_tags(raw_content)
-                    
-                    # Clean up AI-generated content
-                    assistant_message = re.sub(
-                        r'📚\s*\*\*Sources\*\*.*?(?=\n\n|$)',
-                        '',
-                        assistant_message,
-                        flags=re.DOTALL
-                    ).strip()
-                    assistant_message = re.sub(
-                        r'```html.*?(?=\n\n|$)',
-                        '',
-                        assistant_message,
-                        flags=re.DOTALL | re.IGNORECASE
-                    ).strip()
-                    assistant_message = re.sub(
-                        r'\[Wikipedia\]\(https?://[^\)]+\)',
-                        '',
-                        assistant_message
-                    ).strip()
-                    assistant_message = re.sub(
-                        r'\*Source:.*?\*',
-                        '',
-                        assistant_message,
-                        flags=re.IGNORECASE
-                    ).strip()
-                    assistant_message = re.sub(
-                        r'\[Calls? .+?\]',
-                        '',
-                        assistant_message,
-                        flags=re.IGNORECASE
-                    ).strip()
-                    while '\n\n\n' in assistant_message:
-                        assistant_message = assistant_message.replace('\n\n\n', '\n\n')
-                    
-                    clean_content = remove_thinking_tags(raw_content)
-                    conversation_history[channel_id].append({
-                        "role": "assistant", 
-                        "content": clean_content if clean_content else "Acknowledged."
-                    })
-                    break
-
-                # Process tool calls
-                tool_results = []
+            # Build context from profile
+            if static_facts or dynamic_context:
+                context_parts = []
+                if static_facts:
+                    context_parts.append("**User Profile (Static):**\n" + "\n".join(f"- {fact}" for fact in static_facts[:5]))
+                if dynamic_context:
+                    context_parts.append("**Recent Context:**\n" + "\n".join(f"- {ctx}" for ctx in dynamic_context[:5]))
                 
-                for tool_call in tool_calls:
-                    fname = tool_call.function.name
-                    try:
-                        fargs = json.loads(tool_call.function.arguments)
-                    except:
-                        fargs = {}
-
-                    tool_result = ""
-                    
-                    if fname == "search_wikipedia":
-                        query = fargs.get('query', '')
-                        await update_progress(f"🔍 **Searching Wikipedia...**\n\n> {query}")
-                        tool_result = await execute_wiki_search(query)
-
-                    elif fname == "get_wikipedia_page":
-                        title = fargs.get('title', '')
-                        await update_progress(f"📖 **Reading Article...**\n\n> {title}")
-                        tool_result = await execute_wiki_page(title)
-                        
-                        # Track source
-                        wiki_url = f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}"
-                        if wiki_url not in sources_used:
-                            sources_used.append(wiki_url)
-                        
-                        # Track page title for RAG validation
-                        if 'pages_read_tracker' in locals() and RAG_AVAILABLE and RAG_STORE is not None:
-                            pages_read_tracker.append(title)
-                            try:
-                                completeness = RAG_STORE.check_research_completeness(question, pages_read_tracker)
-                                if not completeness['complete']:
-                                    messages.append({
-                                        "role": "system",
-                                        "content": f"⚠️ Research Incomplete: {completeness['reason']}"
-                                    })
-                            except:
-                                pass
-
-                    elif fname == "deploy_html":
-                        html_value = fargs.get('value', '')
-                        await update_progress(f"🌐 **Deploying HTML...**")
-                        tool_result = await execute_deploy_html(html_value)
-
-                    tool_results.append({
-                        "tool_call_id": tool_call.id,
-                        "role": "tool",
-                        "name": fname,
-                        "content": str(tool_result)
-                    })
-
-                # Add assistant message with tool calls to history
-                clean_content = remove_thinking_tags(raw_content)
-                if not clean_content:
-                    if tool_calls:
-                        tool_names = [tc.function.name for tc in tool_calls]
-                        if len(tool_names) == 1:
-                            tool_name = tool_names[0]
-                            if tool_name == "search_wikipedia":
-                                clean_content = "Searching Wikipedia for information."
-                            elif tool_name == "get_wikipedia_page":
-                                clean_content = "Reading Wikipedia article."
-                            elif tool_name == "deploy_html":
-                                clean_content = "Deploying HTML to public URL."
-                            else:
-                                clean_content = f"Calling {tool_name} tool."
-                        else:
-                            clean_content = f"Calling tools: {', '.join(tool_names)}."
-                    else:
-                        clean_content = "Processing request."
-                    
-                messages.append({
-                    "role": "assistant",
-                    "content": clean_content,
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments
-                            }
-                        } for tc in tool_calls
-                    ]
-                })
-
-                # Add tool results to messages
-                messages.extend(tool_results)
-
-                # After reading Wikipedia articles, prompt AI to think about what was learned
-                last_tool_name = tool_results[-1].get("name", "") if tool_results else ""
-                if last_tool_name == "get_wikipedia_page":
-                    messages.append({
-                        "role": "system",
-                        "content": (
-                            "You just read a Wikipedia article. Now think about:\n"
-                            "1. What information did you learn from this article?\n"
-                            "2. Do you need to read more information to answer the user's question?\n"
-                            "3. If researching a current leader, have you read both their position page AND their bio page?\n\n"
-                            "Think step-by-step in a 基督 block, then either call more tools or provide your answer."
-                        )
-                    })
-                elif last_tool_name == "search_wikipedia":
-                    messages.append({
-                        "role": "system",
-                        "content": (
-                            "You just received search results. Think about:\n"
-                            "1. Which result(s) should you read to answer the user's question?\n"
-                            "2. What's your next step - read a Wikipedia article?\n\n"
-                            "Think step-by-step in a 基督 block, then call get_wikipedia_page or provide your answer."
-                        )
-                    })
-
-            # At max iterations, just extract what we have
-            if iteration >= max_iterations:
-                assistant_message = remove_thinking_tags(raw_content)
-
-            # Add sources if any were used
-            if sources_used and assistant_message:
-                sources_text = "\n\n📚 **Sources**\n"
-                for idx, source in enumerate(sources_used, 1):
-                    sources_text += f"{idx}. [Wikipedia]({source})\n"
-                assistant_message += sources_text
-
-            # Send final answer as separate message
-            if assistant_message:
-                final_text = assistant_message.strip()
+                context_from_memory = "\n\n".join(context_parts)
+            
+            # If search results were included
+            search_results = profile_data.get('searchResults', {}).get('results', [])
+            if search_results:
+                memory_texts = []
+                for result in search_results[:3]:
+                    if 'memory' in result:
+                        memory_texts.append(result['memory'][:200])
+                    elif 'chunk' in result:
+                        memory_texts.append(result['chunk'][:200])
                 
-                # Send answer as a regular message (not in embed)
-                while final_text:
-                    await ctx.send(final_text[:1990])
-                    final_text = final_text[1990:]
-            else:
-                await ctx.send("I couldn't generate a response. Please try again.")
+                if memory_texts:
+                    context_from_memory += "\n\n**Relevant Memories:**\n" + "\n".join(f"- {mem}" for mem in memory_texts)
+    
+    system_prompt = get_system_prompt(model_name, has_memory=(supermemory and supermemory.enabled))
+    
+    # Add memory context to system prompt if available
+    if context_from_memory:
+        system_prompt += f"\n\n### USER CONTEXT FROM MEMORY\n{context_from_memory}\n"
+    
+    recent_context = conversation_history[cid][-4:] if conversation_history[cid] else []
+    
+    messages = [
+        {"role": "system", "content": system_prompt}
+    ] + recent_context + [
+        {"role": "user", "content": prompt}
+    ]
+    
+    embed = discord.Embed(title="Reasoning", color=0x5865F2)
+    reasoning_msg = await channel.send(embed=embed)
+    
+    display_sections = []
+    sources = {}
+    failed_pages = set()
+    tool_call_count = 0
+    max_tools = 12
+    
+    has_planning = False
+    has_synthesis = False
+    pages_read = 0
+    is_research_query = False
+    is_llama = "llama" in model_name.lower()
 
-    except Exception as e:
-        error_text = f"❌ **Error:** {str(e)}"
+    async def update_ui(final=False):
+        seen = set()
+        unique_sections = []
+        for section in display_sections:
+            section_key = section[:100]
+            if section_key not in seen:
+                seen.add(section_key)
+                unique_sections.append(section)
+        
+        if final:
+            unique_sections = convert_to_past_tense(unique_sections)
+        
+        embed.description = "\n\n".join(unique_sections)[:4000]
         try:
-            if progress_msg:
-                error_embed = discord.Embed(
-                    title="Reasoning",
-                    description=error_text[:4096],
-                    color=0xED4245
-                )
-                await progress_msg.edit(embed=error_embed)
-            else:
-                await ctx.send(error_text)
+            await reasoning_msg.edit(embed=embed)
         except:
             pass
-        
-        print(f"Error: {e}")
-        import traceback
-        traceback.print_exc()
 
+    for iteration in range(30):
+        if len(str(messages)) > 20000:
+            messages = [messages[0]] + messages[-12:]
+        
+        try:
+            response = groq_client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                tools=get_tools(include_memory=(supermemory and supermemory.enabled)),
+                tool_choice="auto",
+                temperature=0.2,
+                max_tokens=2000
+            )
+        except Exception as e:
+            error_msg = str(e)
+            
+            if "tool_use_failed" in error_msg and is_llama:
+                messages.append({
+                    "role": "user",
+                    "content": "ERROR: Separate <think> and tool calls. ONE per response."
+                })
+                continue
+            elif "rate_limit" in error_msg.lower() or "413" in error_msg or "too large" in error_msg.lower():
+                await channel.send(f"⚠️ Context too large. Trimming...")
+                messages = [messages[0]] + messages[-8:]
+                continue
+            else:
+                await channel.send(f"⚠️ API Error: {e}")
+                return
+
+        msg = response.choices[0].message
+        content = msg.content or ""
+        
+        hallucinated = re.search(r'<function[^>]*>|(?:search_wikipedia|get_wikipedia_page|search_memory)\s*\(|\{\s*"query":', content, re.IGNORECASE)
+        
+        think = extract_reasoning(content)
+        if think:
+            is_research_query = True
+            header, body = parse_thinking_with_header(think)
+            
+            if header:
+                if "Planning" in header or "planning" in header.lower():
+                    has_planning = True
+                elif "Synthesiz" in header or "synthesiz" in header.lower():
+                    has_synthesis = True
+            
+            if body and len(body) > 500:
+                body = body[:500] + "..."
+            
+            if header and body:
+                thinking_section = f"🧠 **Thought**\n\n> **{header}**\n\n{body}"
+            elif body:
+                thinking_section = f"🧠 **Thought**\n\n> {think[:500]}"
+            else:
+                thinking_section = f"🧠 **Thought**\n\n> {think[:500]}"
+            
+            display_sections.append(thinking_section)
+            await update_ui()
+
+        tool_calls = msg.tool_calls
+        
+        if tool_calls:
+            is_research_query = True
+        
+        if hallucinated and not tool_calls:
+            messages.append({"role": "assistant", "content": content})
+            messages.append({"role": "user", "content": "ERROR: Use native API only."})
+            continue
+        
+        if is_llama and think and tool_calls:
+            messages.append({"role": "assistant", "content": content})
+            messages.append({
+                "role": "user",
+                "content": "ERROR: NEVER combine <think> and tool calls."
+            })
+            continue
+        
+        if not has_planning and tool_calls and iteration == 0:
+            messages.append({
+                "role": "assistant",
+                "content": content,
+                "tool_calls": [
+                    {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                    for tc in tool_calls
+                ]
+            })
+            messages.append({
+                "role": "user",
+                "content": "ERROR: Start with <think>**Planning**</think> FIRST."
+            })
+            continue
+        
+        if tool_calls:
+            messages.append({
+                "role": "assistant",
+                "content": content,
+                "tool_calls": [
+                    {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                    for tc in tool_calls
+                ]
+            })
+            
+            for tool_call in tool_calls:
+                tool_call_count += 1
+                
+                if tool_call_count > max_tools:
+                    error_msg = "⚠️ **Tool Limit Reached**"
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "name": tool_call.function.name,
+                        "content": "Maximum tools. Synthesize and answer now."
+                    })
+                    display_sections.append(error_msg)
+                    await update_ui()
+                    continue
+                
+                fn_name = tool_call.function.name
+                
+                try:
+                    fn_args = json.loads(tool_call.function.arguments)
+                except json.JSONDecodeError:
+                    result = "ERROR: Invalid arguments"
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "name": fn_name,
+                        "content": result
+                    })
+                    continue
+                
+                if fn_name == "search_memory":
+                    if not (supermemory and supermemory.enabled):
+                        result = "Memory search unavailable. Enable Supermemory to use this feature."
+                    else:
+                        query = fn_args.get('query', '')
+                        display_sections.append(f"🧠 **Searching Memory...**\n\n> {query}")
+                        await update_ui()
+                        
+                        # Search memory with user filter
+                        memories = await supermemory.search_memory(
+                            query=query,
+                            container_tag=container_tag,
+                            limit=3
+                        )
+                        
+                        if memories:
+                            # Format memory results - handle both memory and chunk results
+                            memory_texts = []
+                            for mem in memories:
+                                if isinstance(mem, dict):
+                                    # Check if it's a memory result or chunk result
+                                    if 'memory' in mem:
+                                        content_text = mem['memory']
+                                    elif 'chunk' in mem:
+                                        content_text = mem['chunk']
+                                    else:
+                                        content_text = mem.get('content', str(mem))
+                                    
+                                    # Add metadata if available
+                                    metadata = mem.get('metadata', {})
+                                    similarity = mem.get('similarity', 0)
+                                    
+                                    memory_texts.append(f"[Similarity: {similarity:.2f}] {content_text[:200]}")
+                                else:
+                                    memory_texts.append(str(mem)[:200])
+                            
+                            result = "Past conversations found:\n" + "\n\n".join(memory_texts)
+                        else:
+                            result = "No relevant past conversations found for this query."
+                
+                elif fn_name == "search_wikipedia":
+                    query = fn_args.get('query', '')
+                    display_sections.append(f"🔍 **Searching Wikipedia...**\n\n> {query}")
+                    await update_ui()
+                    result = await search_wikipedia(query)
+                    
+                elif fn_name == "get_wikipedia_page":
+                    title = fn_args.get('title', '')
+                    
+                    if title in failed_pages:
+                        result = f"Already tried '{title}'."
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "name": fn_name,
+                            "content": result
+                        })
+                        display_sections.append(f"⚠️ **Skipped Duplicate**\n\n> {title}")
+                        await update_ui()
+                        continue
+                    
+                    wiki_url = f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}"
+                    display_sections.append(f"📖 **Reading Article...**\n\n- [{title}]({wiki_url})")
+                    await update_ui()
+                    result = await get_wikipedia_page(title)
+                    
+                    if "Failed" in result or "not found" in result or "no readable text" in result:
+                        failed_pages.add(title)
+                    else:
+                        pages_read += 1
+                        sources[title] = wiki_url
+                else:
+                    result = "ERROR: Unknown function"
+                
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "name": fn_name,
+                    "content": str(result)[:1800]
+                })
+        
+        else:
+            final_answer = clean_output(content)
+            
+            if is_research_query:
+                if pages_read < 3 and not has_synthesis:
+                    messages.append({"role": "assistant", "content": content})
+                    messages.append({
+                        "role": "user",
+                        "content": f"Read {3 - pages_read} more page(s)."
+                    })
+                    continue
+                
+                if not has_synthesis and final_answer.strip() and pages_read >= 3:
+                    messages.append({"role": "assistant", "content": content})
+                    messages.append({
+                        "role": "user",
+                        "content": "Use <think> to synthesize findings briefly."
+                    })
+                    continue
+            
+            if not final_answer.strip():
+                if iteration < 28:
+                    messages.append({"role": "assistant", "content": content})
+                    messages.append({
+                        "role": "user",
+                        "content": "Provide final answer with citations."
+                    })
+                    continue
+                else:
+                    final_answer = "I apologize, but I wasn't able to find a clear answer."
+            
+            # Add sources to final answer
+            if sources and is_research_query:
+                final_answer += "\n\n📚 **Sources**"
+                for idx, (title, url) in enumerate(sorted(sources.items()), 1):
+                    final_answer += f"\n{idx}. [{title}]({url})"
+            
+            # Save to Supermemory if enabled and it's a meaningful interaction
+            if supermemory and supermemory.enabled and final_answer and len(final_answer) > 50:
+                # Prepare memory content - store the conversation exchange
+                memory_content = f"User: {prompt}\n\nAssistant: {final_answer[:1500]}"
+                
+                # Prepare metadata
+                metadata = {
+                    "timestamp": datetime.now().isoformat(),
+                    "model": model_name,
+                    "type": "research_qa" if is_research_query else "conversation",
+                    "channel_id": str(cid),
+                    "sources_count": len(sources) if sources else 0
+                }
+                
+                # Save asynchronously without blocking
+                asyncio.create_task(supermemory.add_memory(
+                    content=memory_content,
+                    container_tag=container_tag,
+                    metadata=metadata
+                ))
+                print(f"💾 Saving to memory for user {user_id}")
+            
+            # Update conversation history
+            conversation_history[cid].append({"role": "user", "content": prompt})
+            conversation_history[cid].append({"role": "assistant", "content": final_answer[:400]})
+            
+            # Trim conversation history
+            if len(conversation_history[cid]) > 6:
+                conversation_history[cid] = conversation_history[cid][-6:]
+            
+            # Update UI to show completion
+            embed.title = "✅ Reasoning Complete"
+            embed.color = 0x57F287
+            await update_ui(final=True)
+            
+            # Send final answer
+            if len(final_answer) > 2000:
+                chunks = [final_answer[i:i+2000] for i in range(0, len(final_answer), 2000)]
+                for chunk in chunks:
+                    await channel.send(chunk)
+            else:
+                await channel.send(final_answer)
+            
+            return
+    
+    # If loop exhausted
+    await channel.send("⚠️ Reasoning exceeded maximum iterations.")
 
 if __name__ == "__main__":
     if not DISCORD_BOT_TOKEN:
-        print("ERROR: DISCORD_BOT_TOKEN missing")
+        print("❌ Error: DISCORD_BOT_TOKEN not set in .env file")
         exit(1)
+    if not GROQ_API_KEY:
+        print("❌ Error: GROQ_API_KEY not set in .env file")
+        exit(1)
+    
+    print("🚀 Starting Discord bot...")
     bot.run(DISCORD_BOT_TOKEN)
