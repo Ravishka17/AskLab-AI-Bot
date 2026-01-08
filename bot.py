@@ -6,15 +6,28 @@ import asyncio
 import json
 import discord
 from datetime import datetime
-from config import bot, conversation_history, user_model_preferences, AVAILABLE_MODELS, groq_client
+from discord.ext import commands
+
+# Import configurations and utilities
+from config import (
+    conversation_history,
+    user_model_preferences,
+    groq_client,
+    DISCORD_BOT_TOKEN
+)
+import os
 from supermemory import SupermemoryClient
-from supermemory import SUPERMEMORY_API_KEY
 from discord_ui import ModelSelectView
 from ai_utils import get_tools, clean_output, get_system_prompt
 from wikipedia import search_wikipedia, get_wikipedia_page
 
+# Initialize bot
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix='!', intents=intents)
+
 # Initialize Supermemory
-supermemory = SupermemoryClient(SUPERMEMORY_API_KEY)
+supermemory = SupermemoryClient(config.SUPERMEMORY_API_KEY)
 
 async def select_model(interaction: discord.Interaction):
     """Handle model selection."""
@@ -38,7 +51,7 @@ async def memory_stats(interaction: discord.Interaction):
         ephemeral=True
     )
 
-async def on_ready():
+async def bot_ready():
     """Bot startup event."""
     print(f'🚀 {bot.user} is now online!')
     print(f'📊 Connected to {len(bot.guilds)} servers')
@@ -55,7 +68,7 @@ async def on_ready():
     if supermemory.enabled:
         await supermemory.test_connection()
 
-async def on_message(message):
+async def bot_message(message):
     """Handle incoming messages."""
     # Ignore bot messages
     if message.author.bot:
@@ -71,6 +84,7 @@ async def on_message(message):
             return
         
         # Get user's model preference
+        from config import user_model_preferences
         model_name = user_model_preferences.get(user_id, "llama-3.3-70b-versatile")
         
         # Send thinking message
@@ -103,8 +117,8 @@ async def run_research(channel, prompt, model_name, user_id, thinking_msg=None):
     cid = f"{channel.id}_{user_id}"
     
     # Initialize conversation history for this channel
-    if cid not in conversation_history:
-        conversation_history[cid] = []
+    if cid not in config.conversation_history:
+        config.conversation_history[cid] = []
     
     # Get Supermemory context if available
     memory_context = ""
@@ -143,7 +157,7 @@ async def run_research(channel, prompt, model_name, user_id, thinking_msg=None):
         })
     
     # Add conversation history (last 3 exchanges)
-    messages.extend(conversation_history[cid][-6:])
+    messages.extend(config.conversation_history[cid][-6:])
     
     # Add current prompt
     messages.append({"role": "user", "content": prompt})
@@ -179,7 +193,7 @@ async def run_research(channel, prompt, model_name, user_id, thinking_msg=None):
             # Get AI response
             tools = get_tools(has_memory)
             
-            response = groq_client.chat.completions.create(
+            response = config.groq_client.chat.completions.create(
                 model=model_name,
                 messages=messages,
                 tools=tools if tools else None,
@@ -323,12 +337,12 @@ async def run_research(channel, prompt, model_name, user_id, thinking_msg=None):
                     print(f"💾 Saving to memory for user {user_id}")
                 
                 # Update conversation history
-                conversation_history[cid].append({"role": "user", "content": prompt})
-                conversation_history[cid].append({"role": "assistant", "content": final_answer[:400]})
+                config.conversation_history[cid].append({"role": "user", "content": prompt})
+                config.conversation_history[cid].append({"role": "assistant", "content": final_answer[:400]})
                 
                 # Trim conversation history
-                if len(conversation_history[cid]) > 6:
-                    conversation_history[cid] = conversation_history[cid][-6:]
+                if len(config.conversation_history[cid]) > 6:
+                    config.conversation_history[cid] = config.conversation_history[cid][-6:]
                 
                 # Update UI to show completion
                 await update_ui(final=True)
@@ -354,11 +368,11 @@ async def run_research(channel, prompt, model_name, user_id, thinking_msg=None):
 # Set up event handlers
 @bot.event
 async def on_ready():
-    await on_ready()
+    await bot_ready()
 
 @bot.event
 async def on_message(message):
-    await on_message(message)
+    await bot_message(message)
 
 # Set up slash commands
 @bot.tree.command(name="model", description="Select your preferred AI model")

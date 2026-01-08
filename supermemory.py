@@ -6,6 +6,7 @@ import asyncio
 import requests
 import os
 
+# Get API key from environment
 SUPERMEMORY_API_KEY = os.getenv('SUPERMEMORY_API_KEY')
 
 class SupermemoryClient:

@@ -64,30 +64,6 @@ def get_tools(include_memory=False):
     
     return tools
 
-def extract_reasoning(text):
-    """Extract thinking sections from text."""
-    if not text:
-        return []
-    
-    # Pattern to match thinking sections
-    pattern = r'<(?:think|thinking)>(.*?)</(?:think|thinking)>'
-    matches = re.findall(pattern, text, re.DOTALL | re.IGNORECASE)
-    
-    return [match.strip() for match in matches if match.strip()]
-
-def parse_thinking_with_header(think_text):
-    """Parse thinking text to extract header and body."""
-    if not think_text:
-        return None, None
-    
-    match = re.match(r'\*\*([^*]+)\*\*\s*(.*)', think_text, re.DOTALL)
-    if match:
-        header = match.group(1).strip()
-        body = match.group(2).strip()
-        return header, body
-    
-    return None, think_text
-
 def clean_output(text):
     """Removes thinking tags and hallucinated tool calls from final output."""
     if not text:
@@ -118,18 +94,6 @@ def clean_output(text):
     text = re.sub(r'^\s*Anura Kumara Dissanayake Sri Lanka president\s*$', '', text, flags=re.MULTILINE)
     
     return text.strip()
-
-def convert_to_past_tense(sections):
-    """Convert action verbs to past tense in completed reasoning."""
-    converted = []
-    for section in sections:
-        section = section.replace("**Searching Wikipedia...**", "**Searched Wikipedia**")
-        section = section.replace("**Reading Article...**", "**Read Article**")
-        section = section.replace("**Searching Memory...**", "**Searched Memory**")
-        section = section.replace("**Thinking...**", "**Thought**")
-        section = section.replace("**Skipping Duplicate**", "**Skipped Duplicate**")
-        converted.append(section)
-    return converted
 
 def get_system_prompt(model_name, has_memory=False):
     """Get model-specific system prompt."""

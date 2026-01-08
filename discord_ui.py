@@ -3,7 +3,12 @@
 Discord UI components for AskLab AI Bot
 """
 import discord
-from config import AVAILABLE_MODELS, user_model_preferences
+from config import AVAILABLE_MODELS
+
+# Import user preferences dynamically to avoid circular imports
+def get_user_preferences():
+    from config import user_model_preferences
+    return user_model_preferences
 
 class ModelSelectView(discord.ui.View):
     def __init__(self, user_id):
@@ -41,7 +46,8 @@ class ModelDropdown(discord.ui.Select):
             return
         
         selected_model = self.values[0]
-        user_model_preferences[self.user_id] = selected_model
+        user_prefs = get_user_preferences()
+        user_prefs[self.user_id] = selected_model
         
         model_names = {v: k for k, v in AVAILABLE_MODELS.items()}
         model_display = model_names.get(selected_model, selected_model)

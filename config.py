@@ -20,9 +20,6 @@ groq_client = Groq(api_key=GROQ_API_KEY)
 intents = discord.Intents.default()
 intents.message_content = True
 
-# --- BOT SETUP ---
-bot = commands.Bot(command_prefix='!', intents=intents)
-
 # --- CONSTANTS ---
 WIKI_HEADERS = {"User-Agent": "AskLabBot/2.0 (contact: admin@asklab.ai) aiohttp/3.8"}
 

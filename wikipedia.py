@@ -4,7 +4,14 @@ Wikipedia utilities for AskLab AI Bot
 """
 import aiohttp
 import asyncio
-from config import WIKI_HEADERS
+import os
+
+# Import WIKI_HEADERS from config
+try:
+    from config import WIKI_HEADERS
+except ImportError:
+    # Fallback if import fails
+    WIKI_HEADERS = {"User-Agent": "AskLabBot/2.0 (contact: admin@asklab.ai) aiohttp/3.8"}
 
 async def fetch_wiki(params, retries=3):
     """Fetch data from Wikipedia API with retries."""
