@@ -15,6 +15,7 @@ from config import (
     groq_client,
     DISCORD_BOT_TOKEN
 )
+import config
 import os
 from supermemory import SupermemoryClient
 from discord_ui import ModelSelectView
