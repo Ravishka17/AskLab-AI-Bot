@@ -30,7 +30,7 @@ WIKI_HEADERS = {"User-Agent": "AskLabBot/2.0 (contact: admin@asklab.ai) aiohttp/
 
 # Available models
 AVAILABLE_MODELS = {
-    "Llama 3.3 70B": "llama-3.3-70b-versatile",
+    "GPT-OSS 120B": "openai/gpt-oss-120b",
     "Kimi K2 Instruct": "moonshotai/kimi-k2-instruct-0905"
 }
 
@@ -210,8 +210,38 @@ class SupermemoryClient:
 supermemory = SupermemoryClient(SUPERMEMORY_API_KEY) if SUPERMEMORY_API_KEY else None
 
 # --- TOOL DEFINITIONS ---
-def get_tools(include_memory=False):
-    """Get tool definitions, optionally including memory search."""
+def get_tools_for_model(model_name, include_memory=False):
+    """Get tool definitions based on model type."""
+    # GPT-OSS models use Groq's built-in tools (web search, code execution)
+    if "gpt-oss" in model_name.lower():
+        tools = [
+            {"type": "web_search"},
+            {"type": "code_execution"}
+        ]
+        
+        # Add memory search for GPT-OSS if enabled
+        if include_memory:
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "search_memory",
+                    "description": "Search past conversations and research results from your memory.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "What to search for in memory (e.g., 'python tutorial', 'last week discussion')"
+                            }
+                        },
+                        "required": ["query"]
+                    }
+                }
+            })
+        
+        return tools
+    
+    # Kimi K2 uses custom Wikipedia tools
     base_tools = [
         {
             "type": "function",
@@ -437,27 +467,24 @@ def get_system_prompt(model_name, has_memory=False):
         + memory_instruction
     )
     
-    if "llama" in model_name.lower():
+    if "gpt-oss" in model_name.lower():
         return base_prompt + (
-            "### RESEARCH WORKFLOW (COMPACT - MAX 12 STEPS)\n"
-            "1. <think>Strategy (50 chars max)</think>\n"
-            "2. search_wikipedia\n"
-            "3. <think>Pick 2 best pages</think>\n"
-            "4. get_wikipedia_page (page 1)\n"
-            "5. <think>Facts (50 chars)</think>\n"
-            "6. get_wikipedia_page (page 2)\n"
-            "7. <think>Facts (50 chars)</think>\n"
-            "8. get_wikipedia_page (page 3 if needed)\n"
-            "9. <think>Synthesis (80 chars)</think>\n"
-            "10. Answer with citations\n\n"
+            "### BUILT-IN TOOLS\n"
+            "You have access to powerful built-in tools:\n"
+            "- **web_search**: Search the web for current information\n"
+            "- **code_execution**: Execute Python code for calculations and analysis\n\n"
+            "### RESEARCH WORKFLOW\n"
+            "1. For factual questions: Use web_search to find current information\n"
+            "2. For calculations: Use code_execution to run Python code\n"
+            "3. Synthesize findings into a clear answer with citations\n\n"
             "### CRITICAL RULES\n"
-            "- ONE ACTION PER RESPONSE: <think> OR tool, NEVER BOTH\n"
-            "- ALL thinking MUST be under 80 chars (bullet points only!)\n"
-            "- 2-3 pages minimum before answering\n"
-            "- NO explanations in thinking - just facts/decisions\n"
-            "- Complete within 15 iterations total\n"
+            "- Use web_search for factual, current information\n"
+            "- Use code_execution for math, data analysis, and computations\n"
+            "- Cite sources from web search results\n"
+            "- Provide clear, comprehensive answers\n"
         )
     else:
+        # Kimi K2 Instruct system prompt
         return base_prompt + (
             "### RESEARCH WORKFLOW\n"
             "1. <think>**Planning**\nStrategy</think>\n"
@@ -486,10 +513,10 @@ class ModelDropdown(discord.ui.Select):
     def __init__(self, user_id):
         options = [
             discord.SelectOption(
-                label="Llama 3.3 70B",
-                description="Fast and versatile",
-                value="llama-3.3-70b-versatile",
-                emoji="🦙"
+                label="GPT-OSS 120B",
+                description="Advanced reasoning with web search",
+                value="openai/gpt-oss-120b",
+                emoji="🧠"
             ),
             discord.SelectOption(
                 label="Kimi K2 Instruct",
@@ -526,7 +553,7 @@ class ModelDropdown(discord.ui.Select):
 @bot.tree.command(name="model", description="Select AI model")
 async def select_model(interaction: discord.Interaction):
     view = ModelSelectView(interaction.user.id)
-    current_model = user_model_preferences.get(interaction.user.id, "moonshotai/kimi-k2-instruct-0905")
+    current_model = user_model_preferences.get(interaction.user.id, "openai/gpt-oss-120b")
     model_names = {v: k for k, v in AVAILABLE_MODELS.items()}
     current_display = model_names.get(current_model, current_model)
     
@@ -595,7 +622,7 @@ async def on_message(message):
         prompt = message.content.replace(f'<@{bot.user.id}>', '').strip()
         if prompt:
             user_id = message.author.id
-            selected_model = user_model_preferences.get(user_id, "moonshotai/kimi-k2-instruct-0905")
+            selected_model = user_model_preferences.get(user_id, "openai/gpt-oss-120b")
             await run_research(message.channel, prompt, selected_model, user_id)
 
 # --- CONTEXT MANAGER ---
@@ -920,6 +947,7 @@ async def run_research(channel, prompt, model_name, user_id):
     pages_read = 0
     is_research_query = False
     is_llama = "llama" in model_name.lower()
+    is_gpt_oss = "gpt-oss" in model_name.lower()
 
     async def update_ui(final=False):
         seen = set()
@@ -940,7 +968,7 @@ async def run_research(channel, prompt, model_name, user_id):
             pass
 
     # Model-specific iteration limits
-    max_iterations = 18 if is_llama else 30
+    max_iterations = 18 if is_llama else (25 if is_gpt_oss else 30)
     
     for iteration in range(max_iterations):
         # Check for stuck loops BEFORE API call
@@ -964,24 +992,34 @@ async def run_research(channel, prompt, model_name, user_id):
             messages = context_mgr.build_optimized_messages(messages, 20, is_llama=is_llama)
         
         try:
-            response = groq_client.chat.completions.create(
-                model=model_name,
-                messages=messages,
-                tools=get_tools(include_memory=(supermemory and supermemory.enabled)),
-                tool_choice="auto",
-                temperature=0.2,
-                max_tokens=2000
-            )
+            # Build API parameters based on model type
+            api_params = {
+                "model": model_name,
+                "messages": messages,
+                "temperature": 0.2,
+                "max_tokens": 2000
+            }
+            
+            # GPT-OSS models support reasoning format and built-in tools
+            if is_gpt_oss:
+                # Use Groq's built-in tools
+                api_params["tools"] = get_tools_for_model(model_name, include_memory=(supermemory and supermemory.enabled))
+                # Enable reasoning format for GPT-OSS
+                api_params["reasoning_format"] = "parsed"
+                api_params["include_reasoning"] = True
+                # Enable prompt caching for better performance
+                if len(messages) > 1 and messages[0].get("role") == "system":
+                    messages[0]["cacheable"] = True
+            else:
+                # Kimi K2 uses custom tools and traditional format
+                api_params["tools"] = get_tools_for_model(model_name, include_memory=(supermemory and supermemory.enabled))
+                api_params["tool_choice"] = "auto"
+            
+            response = groq_client.chat.completions.create(**api_params)
         except Exception as e:
             error_msg = str(e)
             
-            if "tool_use_failed" in error_msg and is_llama:
-                messages.append({
-                    "role": "user",
-                    "content": "ERROR: Separate <think> and tool calls. ONE per response."
-                })
-                continue
-            elif "rate_limit" in error_msg.lower() or "413" in error_msg or "too large" in error_msg.lower():
+            if "rate_limit" in error_msg.lower() or "413" in error_msg or "too large" in error_msg.lower():
                 print(f"⚠️ Context too large error at iteration {iteration}")
                 # Force emergency mode trimming with even more aggressive approach
                 messages = context_mgr.build_optimized_messages(messages, 25, is_llama=is_llama)
@@ -998,6 +1036,17 @@ async def run_research(channel, prompt, model_name, user_id):
         msg = response.choices[0].message
         content = msg.content or ""
         
+        # Handle reasoning content from GPT-OSS models
+        reasoning_content = None
+        if is_gpt_oss and hasattr(msg, 'reasoning_content') and msg.reasoning_content:
+            reasoning_content = msg.reasoning_content
+            # Display reasoning in UI
+            reasoning_section = f"🧠 **Reasoning**\n\n> {reasoning_content[:500]}"
+            if len(reasoning_content) > 500:
+                reasoning_section += "..."
+            display_sections.append(reasoning_section)
+            await update_ui()
+        
         hallucinated = re.search(r'<function[^>]*>|(?:search_wikipedia|get_wikipedia_page|search_memory)\s*\(|\{\s*"query":', content, re.IGNORECASE)
         
         tool_calls = msg.tool_calls
@@ -1005,57 +1054,61 @@ async def run_research(channel, prompt, model_name, user_id):
         # Track in context manager for loop detection
         context_mgr.add_thinking(content, has_tool_calls=bool(tool_calls))
         
-        think = extract_reasoning(content)
-        if think:
-            is_research_query = True
-            header, body = parse_thinking_with_header(think)
-            
-            if header:
-                if "Planning" in header or "planning" in header.lower():
-                    has_planning = True
-                elif "Synthesiz" in header or "synthesiz" in header.lower():
-                    has_synthesis = True
-            
-            # Truncate body for display and storage
-            max_body_length = 150 if is_llama else 500
-            if body and len(body) > max_body_length:
-                body = body[:max_body_length] + "..."
-            
-            if header and body:
-                thinking_section = f"🧠 **Thought**\n\n> **{header}**\n\n{body}"
-            elif body:
-                thinking_section = f"🧠 **Thought**\n\n> {think[:max_body_length]}"
-            else:
-                thinking_section = f"🧠 **Thought**\n\n> {think[:max_body_length]}"
-            
-            display_sections.append(thinking_section)
-            await update_ui()
+        # Handle thinking tags for Kimi K2 (not GPT-OSS which uses reasoning_content)
+        if not is_gpt_oss:
+            think = extract_reasoning(content)
+            if think:
+                is_research_query = True
+                header, body = parse_thinking_with_header(think)
+                
+                if header:
+                    if "Planning" in header or "planning" in header.lower():
+                        has_planning = True
+                    elif "Synthesiz" in header or "synthesiz" in header.lower():
+                        has_synthesis = True
+                
+                # Truncate body for display and storage
+                max_body_length = 500
+                if body and len(body) > max_body_length:
+                    body = body[:max_body_length] + "..."
+                
+                if header and body:
+                    thinking_section = f"🧠 **Thought**\n\n> **{header}**\n\n{body}"
+                elif body:
+                    thinking_section = f"🧠 **Thought**\n\n> {think[:max_body_length]}"
+                else:
+                    thinking_section = f"🧠 **Thought**\n\n> {think[:max_body_length]}"
+                
+                display_sections.append(thinking_section)
+                await update_ui()
         
         if tool_calls:
             is_research_query = True
         
-        if hallucinated and not tool_calls:
+        # Only check for hallucinated tools in Kimi K2 (not GPT-OSS which handles reasoning differently)
+        if not is_gpt_oss and hallucinated and not tool_calls:
             messages.append({"role": "assistant", "content": content})
             messages.append({"role": "user", "content": "ERROR: Use native API only."})
             continue
         
-        if is_llama and think and tool_calls:
-            messages.append({"role": "assistant", "content": content})
-            messages.append({
-                "role": "user",
-                "content": "ERROR: NEVER combine <think> and tool calls."
-            })
-            continue
-        
         if tool_calls:
-            messages.append({
+            # Build assistant message with tool calls
+            assistant_msg = {
                 "role": "assistant",
-                "content": content,
-                "tool_calls": [
-                    {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
-                    for tc in tool_calls
-                ]
-            })
+                "content": content
+            }
+            
+            # Add reasoning content if present (for GPT-OSS)
+            if reasoning_content:
+                assistant_msg["reasoning_content"] = reasoning_content
+            
+            # Add tool calls
+            assistant_msg["tool_calls"] = [
+                {"id": tc.id, "type": tc.type, "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                for tc in tool_calls
+            ]
+            
+            messages.append(assistant_msg)
             
             for tool_call in tool_calls:
                 tool_call_count += 1
@@ -1072,6 +1125,34 @@ async def run_research(channel, prompt, model_name, user_id):
                     await update_ui()
                     continue
                 
+                # Check if this is a built-in tool (web_search, code_execution)
+                is_builtin_tool = tool_call.type in ["web_search", "code_execution"]
+                
+                if is_builtin_tool:
+                    # Built-in tools are handled automatically by Groq
+                    # We just need to display them in the UI
+                    tool_type = tool_call.type
+                    
+                    if tool_type == "web_search":
+                        # Extract query from tool call if available
+                        query_display = "Searching the web..."
+                        try:
+                            if hasattr(tool_call, 'function') and tool_call.function.arguments:
+                                fn_args = json.loads(tool_call.function.arguments)
+                                query_display = f"Searching: {fn_args.get('query', 'the web')}"
+                        except:
+                            pass
+                        
+                        display_sections.append(f"🔍 **Web Search**\n\n> {query_display}")
+                        await update_ui()
+                    elif tool_type == "code_execution":
+                        display_sections.append(f"💻 **Code Execution**\n\n> Running Python code...")
+                        await update_ui()
+                    
+                    # Built-in tools don't need explicit handling - continue to next tool
+                    continue
+                
+                # Handle custom function tools
                 fn_name = tool_call.function.name
                 
                 try:
@@ -1177,9 +1258,9 @@ async def run_research(channel, prompt, model_name, user_id):
         else:
             final_answer = clean_output(content)
             
-            if is_research_query:
-                # Model-aware minimum pages check
-                min_pages = 2 if is_llama else 3
+            # For Kimi K2, check minimum pages (GPT-OSS uses web_search instead)
+            if is_research_query and not is_gpt_oss:
+                min_pages = 3
                 if pages_read < min_pages:
                     messages.append({"role": "assistant", "content": content})
                     messages.append({
