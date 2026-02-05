@@ -518,6 +518,137 @@ class ModelDropdown(discord.ui.Select):
             ephemeral=True
         )
 
+# --- CONTEXT MANAGEMENT ---
+class ContextManager:
+    def __init__(self, system_prompt, user_id, channel_id):
+        self.system_prompt = system_prompt
+        self.user_id = user_id
+        self.channel_id = channel_id
+        self.conversation_history = [] # Last 2 exchanges
+        self.research_context = []     # Tool results and summaries
+        self.working_memory = []       # Current/recent iterations
+        self.facts = []
+        self.sources = {}
+        self.pages_read_count = 0
+        self.iteration = 0
+        self.consecutive_thoughts_without_tools = 0
+        self.last_tool_call_iteration = -1
+        
+    def set_history(self, history):
+        # Keep only last 2 exchanges (4 messages: user, assistant, user, assistant)
+        self.conversation_history = history[-4:] if history else []
+
+    def add_fact(self, fact):
+        if fact not in self.facts:
+            self.facts.append(fact)
+
+    def add_source(self, title, url):
+        self.sources[title] = url
+        self.pages_read_count = len(self.sources)
+
+    def build_messages(self, iteration):
+        self.iteration = iteration
+        
+        # 1. System Prompt (Always First)
+        messages = [{"role": "system", "content": self.system_prompt}]
+        
+        # 2. Add Research Progress Marker for AI
+        progress_info = f"[Iteration {iteration}/30] [Pages Read: {self.pages_read_count}/3]"
+        if iteration > 15:
+            progress_info += " [URGENT: Synthesize now]"
+        
+        messages[0]["content"] += f"\n\n### CURRENT STATUS\n{progress_info}\n"
+        
+        if self.facts:
+            # Only include the last 15 facts to keep context clean
+            facts_summary = "\n".join([f"- {f}" for f in self.facts[-15:]])
+            messages[0]["content"] += f"\n### RESEARCH FACTS GATHERED SO FAR\n{facts_summary}\n"
+
+        # 3. Conversation History (Personality/Context) - Only for non-emergency
+        if iteration < 20:
+            messages.extend(self.conversation_history)
+        
+        # 4. Working Memory (Recent interactions)
+        if iteration <= 10:
+            trimmed_working_memory = self.working_memory
+        elif iteration <= 20:
+            # Drop older thought-only blocks, keep all tool calls and results
+            new_wm = []
+            thoughts_to_keep = 2
+            thought_msgs = [m for m in self.working_memory if m.get("role") == "assistant" and "<think>" in (m.get("content") or "") and not m.get("tool_calls")]
+            last_thoughts = thought_msgs[-thoughts_to_keep:] if thought_msgs else []
+            
+            for msg in self.working_memory:
+                if msg.get("role") == "assistant" and "<think>" in (msg.get("content") or "") and not msg.get("tool_calls"):
+                    if msg in last_thoughts:
+                        new_wm.append(msg)
+                else:
+                    new_wm.append(msg)
+            trimmed_working_memory = new_wm
+        else:
+            # Emergency Mode: Keep ALL tool pairs, last user message, and ONLY the very last thought
+            new_wm = []
+            tool_call_ids = set()
+            # First pass: identify all tool_call_ids in tool messages
+            for msg in self.working_memory:
+                if msg.get("role") == "tool":
+                    tool_call_ids.add(msg.get("tool_call_id"))
+            
+            for msg in self.working_memory:
+                if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                    # Check if at least one tool_call in this message has a corresponding result
+                    if any(tc.get("id") in tool_call_ids for tc in msg.get("tool_calls")):
+                        new_wm.append(msg)
+                elif msg.get("role") == "tool":
+                    new_wm.append(msg)
+                elif msg == self.working_memory[-1]: # Last message always kept
+                    if msg not in new_wm: new_wm.append(msg)
+                elif msg.get("role") == "user" and iteration > 25:
+                    # Only keep last user message in extreme emergency
+                    if msg == [m for m in self.working_memory if m.get("role") == "user"][-1]:
+                        new_wm.append(msg)
+                elif msg.get("role") == "assistant" and "<think>" in (msg.get("content") or ""):
+                    # Keep only the very last thought
+                    if msg == [m for m in self.working_memory if m.get("role") == "assistant" and "<think>" in (m.get("content") or "")][-1]:
+                        new_wm.append(msg)
+
+            # Ensure order is preserved
+            trimmed_working_memory = sorted(new_wm, key=lambda x: self.working_memory.index(x) if x in self.working_memory else 0)
+
+        messages.extend(trimmed_working_memory)
+        
+        # Token/Length Management (Approx 15k chars is safe for Groq)
+        while len(str(messages)) > 15000 and len(messages) > 2:
+            # Remove from the middle of working memory (after system and history)
+            if len(messages) > 5:
+                messages.pop(2) # Keep system (0) and history (1) and last ones
+            else:
+                messages.pop(1)
+            
+        return messages
+
+    def add_message(self, role, content=None, tool_calls=None, tool_call_id=None, name=None):
+        msg = {"role": role}
+        if content is not None: msg["content"] = content
+        if tool_calls is not None: msg["tool_calls"] = tool_calls
+        if tool_call_id is not None: msg["tool_call_id"] = tool_call_id
+        if name is not None: msg["name"] = name
+        
+        self.working_memory.append(msg)
+        
+        if role == "assistant" and tool_calls:
+            self.last_tool_call_iteration = self.iteration
+            self.consecutive_thoughts_without_tools = 0
+        elif role == "assistant" and not tool_calls:
+            if "<think>" in (content or ""):
+                self.consecutive_thoughts_without_tools += 1
+
+    def detect_stuck_loop(self):
+        # AI keeps planning but doesn't call tools
+        if self.consecutive_thoughts_without_tools >= 3:
+            return "FORCE_ACTION"
+        return None
+
 # --- SLASH COMMANDS ---
 @bot.tree.command(name="model", description="Select AI model")
 async def select_model(interaction: discord.Interaction):
@@ -596,71 +727,46 @@ async def on_message(message):
 
 async def run_research(channel, prompt, model_name, user_id):
     cid = channel.id
-    container_tag = str(user_id)  # Using user_id as container tag
-    
+    container_tag = str(user_id)
+
     if cid not in conversation_history:
         conversation_history[cid] = []
-    
-    # Get user profile and search memory if Supermemory is enabled
+
+    # Get user profile and search memory
     context_from_memory = ""
     if supermemory and supermemory.enabled:
-        # Get profile with search in one call
         profile_data = await supermemory.get_profile(container_tag, query=prompt)
-        
         if profile_data:
             profile = profile_data.get('profile', {})
             static_facts = profile.get('static', [])
             dynamic_context = profile.get('dynamic', [])
-            
-            # Build context from profile
             if static_facts or dynamic_context:
                 context_parts = []
-                if static_facts:
-                    context_parts.append("**User Profile (Static):**\n" + "\n".join(f"- {fact}" for fact in static_facts[:5]))
-                if dynamic_context:
-                    context_parts.append("**Recent Context:**\n" + "\n".join(f"- {ctx}" for ctx in dynamic_context[:5]))
-                
+                if static_facts: context_parts.append("**User Profile (Static):**\n" + "\n".join(f"- {fact}" for fact in static_facts[:5]))
+                if dynamic_context: context_parts.append("**Recent Context:**\n" + "\n".join(f"- {ctx}" for ctx in dynamic_context[:5]))
                 context_from_memory = "\n\n".join(context_parts)
-            
-            # If search results were included
             search_results = profile_data.get('searchResults', {}).get('results', [])
             if search_results:
-                memory_texts = []
-                for result in search_results[:3]:
-                    if 'memory' in result:
-                        memory_texts.append(result['memory'][:200])
-                    elif 'chunk' in result:
-                        memory_texts.append(result['chunk'][:200])
-                
-                if memory_texts:
-                    context_from_memory += "\n\n**Relevant Memories:**\n" + "\n".join(f"- {mem}" for mem in memory_texts)
-    
+                memory_texts = [res.get('memory', res.get('chunk', ''))[:200] for res in search_results[:3]]
+                if any(memory_texts): context_from_memory += "\n\n**Relevant Memories:**\n" + "\n".join(f"- {mem}" for mem in memory_texts if mem)
+
     system_prompt = get_system_prompt(model_name, has_memory=(supermemory and supermemory.enabled))
-    
-    # Add memory context to system prompt if available
     if context_from_memory:
         system_prompt += f"\n\n### USER CONTEXT FROM MEMORY\n{context_from_memory}\n"
-    
-    recent_context = conversation_history[cid][-4:] if conversation_history[cid] else []
-    
-    messages = [
-        {"role": "system", "content": system_prompt}
-    ] + recent_context + [
-        {"role": "user", "content": prompt}
-    ]
-    
+
+    ctx = ContextManager(system_prompt, user_id, cid)
+    ctx.set_history(conversation_history[cid])
+    ctx.add_message("user", prompt)
+
     embed = discord.Embed(title="Reasoning", color=0x5865F2)
     reasoning_msg = await channel.send(embed=embed)
-    
+
     display_sections = []
-    sources = {}
     failed_pages = set()
     tool_call_count = 0
     max_tools = 12
-    
     has_planning = False
     has_synthesis = False
-    pages_read = 0
     is_research_query = False
     is_llama = "llama" in model_name.lower()
 
@@ -672,20 +778,19 @@ async def run_research(channel, prompt, model_name, user_id):
             if section_key not in seen:
                 seen.add(section_key)
                 unique_sections.append(section)
-        
-        if final:
-            unique_sections = convert_to_past_tense(unique_sections)
-        
+        if final: unique_sections = convert_to_past_tense(unique_sections)
         embed.description = "\n\n".join(unique_sections)[:4000]
-        try:
-            await reasoning_msg.edit(embed=embed)
-        except:
-            pass
+        try: await reasoning_msg.edit(embed=embed)
+        except: pass
 
     for iteration in range(30):
-        if len(str(messages)) > 20000:
-            messages = [messages[0]] + messages[-12:]
-        
+        messages = ctx.build_messages(iteration)
+
+        # Stuck detection & urgency injection
+        stuck_status = ctx.detect_stuck_loop()
+        if stuck_status == "FORCE_ACTION":
+            messages.append({"role": "user", "content": "URGENT: Stop planning. Either call a tool now or provide the final answer if you have enough information."})
+
         try:
             response = groq_client.chat.completions.create(
                 model=model_name,
@@ -697,287 +802,145 @@ async def run_research(channel, prompt, model_name, user_id):
             )
         except Exception as e:
             error_msg = str(e)
-            
-            if "tool_use_failed" in error_msg and is_llama:
-                messages.append({
-                    "role": "user",
-                    "content": "ERROR: Separate <think> and tool calls. ONE per response."
-                })
+            if "rate_limit" in error_msg.lower() or "413" in error_msg or "too large" in error_msg.lower():
+                # ContextManager should have handled this, but if not, emergency trim
+                ctx.working_memory = ctx.working_memory[-5:]
                 continue
-            elif "rate_limit" in error_msg.lower() or "413" in error_msg or "too large" in error_msg.lower():
-                await channel.send(f"⚠️ Context too large. Trimming...")
-                messages = [messages[0]] + messages[-8:]
-                continue
-            else:
-                await channel.send(f"⚠️ API Error: {e}")
-                return
+            await channel.send(f"⚠️ API Error: {e}")
+            return
 
         msg = response.choices[0].message
         content = msg.content or ""
-        
-        hallucinated = re.search(r'<function[^>]*>|(?:search_wikipedia|get_wikipedia_page|search_memory)\s*\(|\{\s*"query":', content, re.IGNORECASE)
-        
+        tool_calls = msg.tool_calls
+
+        if tool_calls: is_research_query = True
+
+        # Track reasoning
         think = extract_reasoning(content)
         if think:
             is_research_query = True
             header, body = parse_thinking_with_header(think)
-            
             if header:
-                if "Planning" in header or "planning" in header.lower():
-                    has_planning = True
-                elif "Synthesiz" in header or "synthesiz" in header.lower():
-                    has_synthesis = True
-            
-            if body and len(body) > 500:
-                body = body[:500] + "..."
-            
-            if header and body:
-                thinking_section = f"🧠 **Thought**\n\n> **{header}**\n\n{body}"
-            elif body:
-                thinking_section = f"🧠 **Thought**\n\n> {think[:500]}"
-            else:
-                thinking_section = f"🧠 **Thought**\n\n> {think[:500]}"
-            
+                if "planning" in header.lower(): has_planning = True
+                elif "synthesiz" in header.lower(): has_synthesis = True
+
+            # Extract facts from reasoning semantically (simple heuristic)
+            if "fact" in think.lower() or "found" in think.lower():
+                for line in think.split('\n'):
+                    if line.strip().startswith(('-', '•', '*')) and len(line) > 20:
+                        ctx.add_fact(line.strip())
+
+            thinking_section = f"🧠 **Thought**\n\n> **{header or 'Thinking'}**\n\n{body or think[:500]}"
             display_sections.append(thinking_section)
             await update_ui()
 
-        tool_calls = msg.tool_calls
-        
-        if tool_calls:
-            is_research_query = True
-        
+        # Handle hallucinations
+        hallucinated = re.search(r'<function[^>]*>|(?:search_wikipedia|get_wikipedia_page|search_memory)\s*\(|\{\s*"query":', content, re.IGNORECASE)
         if hallucinated and not tool_calls:
-            messages.append({"role": "assistant", "content": content})
-            messages.append({"role": "user", "content": "ERROR: Use native API only."})
+            ctx.add_message("assistant", content)
+            ctx.add_message("user", "ERROR: Use native tool calls only. Do not simulate them.")
             continue
-        
+
         if is_llama and think and tool_calls:
-            messages.append({"role": "assistant", "content": content})
-            messages.append({
-                "role": "user",
-                "content": "ERROR: NEVER combine <think> and tool calls."
-            })
+            ctx.add_message("assistant", content)
+            ctx.add_message("user", "ERROR: NEVER combine <think> and tool calls.")
             continue
-        
+
         if not has_planning and tool_calls and iteration == 0:
-            messages.append({
-                "role": "assistant",
-                "content": content,
-                "tool_calls": [
-                    {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
-                    for tc in tool_calls
-                ]
-            })
-            messages.append({
-                "role": "user",
-                "content": "ERROR: Start with <think>**Planning**</think> FIRST."
-            })
+            ctx.add_message("assistant", content, tool_calls=[{"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}} for tc in tool_calls])
+            ctx.add_message("user", "ERROR: Start with <think>**Planning**</think> FIRST.")
             continue
-        
+
         if tool_calls:
-            messages.append({
-                "role": "assistant",
-                "content": content,
-                "tool_calls": [
-                    {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
-                    for tc in tool_calls
-                ]
-            })
-            
+            ctx.add_message("assistant", content, tool_calls=[{"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}} for tc in tool_calls])
+
             for tool_call in tool_calls:
                 tool_call_count += 1
-                
                 if tool_call_count > max_tools:
-                    error_msg = "⚠️ **Tool Limit Reached**"
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "name": tool_call.function.name,
-                        "content": "Maximum tools. Synthesize and answer now."
-                    })
-                    display_sections.append(error_msg)
+                    ctx.add_message("tool", content="Maximum tools reached. Synthesize findings.", tool_call_id=tool_call.id, name=tool_call.function.name)
+                    display_sections.append("⚠️ **Tool Limit Reached**")
                     await update_ui()
                     continue
-                
+
                 fn_name = tool_call.function.name
-                
-                try:
-                    fn_args = json.loads(tool_call.function.arguments)
-                except json.JSONDecodeError:
-                    result = "ERROR: Invalid arguments"
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "name": fn_name,
-                        "content": result
-                    })
+                try: fn_args = json.loads(tool_call.function.arguments)
+                except:
+                    ctx.add_message("tool", content="ERROR: Invalid JSON arguments", tool_call_id=tool_call.id, name=fn_name)
                     continue
-                
+
+                result = ""
                 if fn_name == "search_memory":
-                    if not (supermemory and supermemory.enabled):
-                        result = "Memory search unavailable. Enable Supermemory to use this feature."
+                    if not (supermemory and supermemory.enabled): result = "Memory unavailable."
                     else:
                         query = fn_args.get('query', '')
                         display_sections.append(f"🧠 **Searching Memory...**\n\n> {query}")
                         await update_ui()
-                        
-                        # Search memory with user filter
-                        memories = await supermemory.search_memory(
-                            query=query,
-                            container_tag=container_tag,
-                            limit=3
-                        )
-                        
-                        if memories:
-                            # Format memory results - handle both memory and chunk results
-                            memory_texts = []
-                            for mem in memories:
-                                if isinstance(mem, dict):
-                                    # Check if it's a memory result or chunk result
-                                    if 'memory' in mem:
-                                        content_text = mem['memory']
-                                    elif 'chunk' in mem:
-                                        content_text = mem['chunk']
-                                    else:
-                                        content_text = mem.get('content', str(mem))
-                                    
-                                    # Add metadata if available
-                                    metadata = mem.get('metadata', {})
-                                    similarity = mem.get('similarity', 0)
-                                    
-                                    memory_texts.append(f"[Similarity: {similarity:.2f}] {content_text[:200]}")
-                                else:
-                                    memory_texts.append(str(mem)[:200])
-                            
-                            result = "Past conversations found:\n" + "\n\n".join(memory_texts)
-                        else:
-                            result = "No relevant past conversations found for this query."
-                
+                        memories = await supermemory.search_memory(query, container_tag, limit=3)
+                        result = "Memories:\n" + "\n".join([str(m) for m in memories]) if memories else "No memories found."
+
                 elif fn_name == "search_wikipedia":
                     query = fn_args.get('query', '')
                     display_sections.append(f"🔍 **Searching Wikipedia...**\n\n> {query}")
                     await update_ui()
                     result = await search_wikipedia(query)
-                    
+
                 elif fn_name == "get_wikipedia_page":
                     title = fn_args.get('title', '')
-                    
                     if title in failed_pages:
-                        result = f"Already tried '{title}'."
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "name": fn_name,
-                            "content": result
-                        })
+                        result = "Already checked."
                         display_sections.append(f"⚠️ **Skipped Duplicate**\n\n> {title}")
-                        await update_ui()
-                        continue
-                    
-                    wiki_url = f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}"
-                    display_sections.append(f"📖 **Reading Article...**\n\n- [{title}]({wiki_url})")
-                    await update_ui()
-                    result = await get_wikipedia_page(title)
-                    
-                    if "Failed" in result or "not found" in result or "no readable text" in result:
-                        failed_pages.add(title)
                     else:
-                        pages_read += 1
-                        sources[title] = wiki_url
-                else:
-                    result = "ERROR: Unknown function"
-                
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "name": fn_name,
-                    "content": str(result)[:1800]
-                })
-        
+                        wiki_url = f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}"
+                        display_sections.append(f"📖 **Reading Article...**\n\n- [{title}]({wiki_url})")
+                        await update_ui()
+                        result = await get_wikipedia_page(title)
+                        if "Failed" in result or "not found" in result: failed_pages.add(title)
+                        else: ctx.add_source(title, wiki_url)
+
+                ctx.add_message("tool", content=str(result)[:1800], tool_call_id=tool_call.id, name=fn_name)
+
         else:
             final_answer = clean_output(content)
-            
+
+            # Enforcement logic
             if is_research_query:
-                if pages_read < 3 and not has_synthesis:
-                    messages.append({"role": "assistant", "content": content})
-                    messages.append({
-                        "role": "user",
-                        "content": f"Read {3 - pages_read} more page(s)."
-                    })
+                if ctx.pages_read_count < 3 and not has_synthesis and iteration < 20:
+                    ctx.add_message("assistant", content)
+                    ctx.add_message("user", f"Read {3 - ctx.pages_read_count} more page(s) before answering.")
                     continue
-                
-                if not has_synthesis and final_answer.strip() and pages_read >= 3:
-                    messages.append({"role": "assistant", "content": content})
-                    messages.append({
-                        "role": "user",
-                        "content": "Use <think> to synthesize findings briefly."
-                    })
+                if not has_synthesis and final_answer.strip() and iteration < 25:
+                    ctx.add_message("assistant", content)
+                    ctx.add_message("user", "Briefly synthesize findings with <think> before final answer.")
                     continue
-            
+
             if not final_answer.strip():
                 if iteration < 28:
-                    messages.append({"role": "assistant", "content": content})
-                    messages.append({
-                        "role": "user",
-                        "content": "Provide final answer with citations."
-                    })
+                    ctx.add_message("assistant", content)
+                    ctx.add_message("user", "Please provide the final answer now.")
                     continue
-                else:
-                    final_answer = "I apologize, but I wasn't able to find a clear answer."
-            
-            # Add sources to final answer
-            if sources and is_research_query:
-                final_answer += "\n\n📚 **Sources**"
-                for idx, (title, url) in enumerate(sorted(sources.items()), 1):
-                    final_answer += f"\n{idx}. [{title}]({url})"
-            
-            # Save to Supermemory if enabled and it's a meaningful interaction
-            if supermemory and supermemory.enabled and final_answer and len(final_answer) > 50:
-                # Prepare memory content - store the conversation exchange
-                memory_content = f"User: {prompt}\n\nAssistant: {final_answer[:1500]}"
-                
-                # Prepare metadata
-                metadata = {
-                    "timestamp": datetime.now().isoformat(),
-                    "model": model_name,
-                    "type": "research_qa" if is_research_query else "conversation",
-                    "channel_id": str(cid),
-                    "sources_count": len(sources) if sources else 0
-                }
-                
-                # Save asynchronously without blocking
-                asyncio.create_task(supermemory.add_memory(
-                    content=memory_content,
-                    container_tag=container_tag,
-                    metadata=metadata
-                ))
-                print(f"💾 Saving to memory for user {user_id}")
-            
-            # Update conversation history
+                final_answer = "I couldn't find a definitive answer."
+
+            if ctx.sources and is_research_query:
+                final_answer += "\n\n📚 **Sources**\n" + "\n".join([f"{i+1}. [{t}]({u})" for i, (t, u) in enumerate(sorted(ctx.sources.items()), 1)])
+
+            # Save to Memory
+            if supermemory and supermemory.enabled and len(final_answer) > 50:
+                asyncio.create_task(supermemory.add_memory(f"User: {prompt}\nAI: {final_answer[:1000]}", container_tag, {"type": "qa"}))
+
+            # History management
             conversation_history[cid].append({"role": "user", "content": prompt})
             conversation_history[cid].append({"role": "assistant", "content": final_answer[:400]})
-            
-            # Trim conversation history
-            if len(conversation_history[cid]) > 6:
-                conversation_history[cid] = conversation_history[cid][-6:]
-            
-            # Update UI to show completion
+            if len(conversation_history[cid]) > 6: conversation_history[cid] = conversation_history[cid][-6:]
+
             embed.title = "✅ Reasoning Complete"
             embed.color = 0x57F287
             await update_ui(final=True)
-            
-            # Send final answer
-            if len(final_answer) > 2000:
-                chunks = [final_answer[i:i+2000] for i in range(0, len(final_answer), 2000)]
-                for chunk in chunks:
-                    await channel.send(chunk)
-            else:
-                await channel.send(final_answer)
-            
+
+            for chunk in [final_answer[i:i+2000] for i in range(0, len(final_answer), 2000)]:
+                await channel.send(chunk)
             return
-    
-    # If loop exhausted
-    await channel.send("⚠️ Reasoning exceeded maximum iterations.")
+
+    await channel.send("⚠️ Max iterations reached.")
 
 if __name__ == "__main__":
     if not DISCORD_BOT_TOKEN:
