@@ -388,6 +388,19 @@ def clean_output(text):
     text = re.sub(r'\n\n(?:search_wikipedia|get_wikipedia_page|search_memory)\([^)]+\)', '', text, flags=re.IGNORECASE)
     text = re.sub(r'I\'ll (?:search|get|fetch|retrieve)[^\n]*\.', '', text, flags=re.IGNORECASE)
     
+    # Remove Discord UI elements that should not appear in final responses
+    text = re.sub(r'✅ Reasoning Complete\s*', '', text)
+    text = re.sub(r'🧠 \*\*Thought\*\*\s*>\s*.*?(?=\n🧠|\n🔍|\n📖|\n⚠️|\n📚|\n\n|\Z)', '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'🔍 \*\*Searched Wikipedia\*\*\s*>\s*.*?(?=\n🧠|\n📖|\n⚠️|\n📚|\n\n|\Z)', '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'📖 \*\*Read Article\*\*\s*\n\s*- \[.*?\]\(.*?\)', '', text)
+    text = re.sub(r'⚠️ \*\*Skipped Duplicate\*\*\s*>\s*.*?(?=\n🧠|\n🔍|\n📖|\n📚|\n\n|\Z)', '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'📚 \*\*Sources\*\*.*', '', text, flags=re.DOTALL | re.IGNORECASE)
+    
+    # Clean up any remaining thinking-related fragments
+    text = re.sub(r'^(The user is asking|Let me search|Key findings|Synthesis:).*$', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^\s*\(AKD|first non-dynastic|unprecedented NPP\)\s*$', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^\s*Anura Kumara Dissanayake Sri Lanka president\s*$', '', text, flags=re.MULTILINE)
+
     return text.strip()
 
 def convert_to_past_tense(sections):
