@@ -440,18 +440,19 @@ def get_system_prompt(model_name, has_memory=False):
     if "llama" in model_name.lower():
         return base_prompt + (
             "### RESEARCH WORKFLOW\n"
-            "1. <think>**Planning**\nStrategy</think>\n"
-            "2. Call search_wikipedia (NO THINKING)\n"
-            "3. <think>List 2-3 pages as links</think>\n"
-            "4. Call get_wikipedia_page (NO THINKING)\n"
-            "5. <think>Summarize facts</think>\n"
-            "6. Repeat for more pages\n"
-            "7. <think>Synthesize findings</think>\n"
-            "8. Final answer with citations\n\n"
+            "1. <think>**Planning**\nStrategy (max 300 chars)</think>\n"
+            "2. Call search_wikipedia\n"
+            "3. <think>List pages as [Title](URL)</think>\n"
+            "4. Call get_wikipedia_page\n"
+            "5. <think>Key facts</think>\n"
+            "6. Repeat steps 4-5 (read 3+ pages)\n"
+            "7. <think>Final synthesis</think>\n"
+            "8. Answer with inline citations [1](URL)\n\n"
             "### CRITICAL RULES\n"
-            "- ONE ACTION PER RESPONSE: thinking OR tool, NEVER BOTH\n"
-            "- Keep thinking under 400 chars\n"
-            "- Read at least 3 pages\n"
+            "- ONE ACTION PER RESPONSE: <think> OR tool call, NEVER BOTH\n"
+            "- Keep ALL thinking under 300 chars (compact!)\n"
+            "- Minimum 3 pages before answering\n"
+            "- Use compact thinking - just key points\n"
         )
     else:
         return base_prompt + (
@@ -655,7 +656,7 @@ class ContextManager:
         else:
             return "general"
     
-    def detect_stuck_loop(self, iteration):
+    def detect_stuck_loop(self, iteration, is_llama=False):
         """Detect if AI is stuck in planning without action."""
         # Pattern 1: Same theme repeated 3+ times (check first - more specific)
         if len(self.last_thinking_themes) >= 3:
@@ -664,14 +665,18 @@ class ContextManager:
                     return "theme_loop"
         
         # Pattern 2: Multiple consecutive thoughts without tool calls (general fallback)
-        if self.consecutive_thoughts_without_tools >= 3:
+        # For Llama, be more lenient as it alternates between thinking and tool calls
+        threshold = 4 if is_llama else 3
+        if self.consecutive_thoughts_without_tools >= threshold:
             return "repeated_planning"
         
-        # Pattern 3: No new facts accumulated for 5+ iterations
+        # Pattern 3: No new facts accumulated - be more lenient for Llama
         current_fact_count = len(self.tool_results)
-        if iteration >= 5 and current_fact_count == self.last_fact_count:
+        if iteration >= 8 and current_fact_count == self.last_fact_count:
             self.iterations_without_new_facts += 1
-            if self.iterations_without_new_facts >= 5:
+            # For Llama, allow more iterations without progress since it alternates
+            threshold = 8 if is_llama else 5
+            if self.iterations_without_new_facts >= threshold:
                 return "no_progress"
         else:
             self.iterations_without_new_facts = 0
@@ -679,20 +684,31 @@ class ContextManager:
         
         return None
     
-    def should_trim_context(self, iteration):
+    def should_trim_context(self, iteration, is_llama=False):
         """Progressive context trimming based on iteration."""
-        if iteration >= 20:
-            return "emergency"  # Minimal context only
-        elif iteration >= 15:
-            return "aggressive"  # System + tool results + user message only
-        elif iteration >= 10:
-            return "moderate"  # Drop old thinking blocks
+        # Llama needs more aggressive trimming due to the alternating pattern
+        if is_llama:
+            if iteration >= 15:
+                return "emergency"  # Minimal context only
+            elif iteration >= 10:
+                return "aggressive"  # System + tool results + user message only
+            elif iteration >= 6:
+                return "moderate"  # Drop old thinking blocks
+            else:
+                return "light"  # Keep only recent thinking
         else:
-            return "none"
+            if iteration >= 20:
+                return "emergency"  # Minimal context only
+            elif iteration >= 15:
+                return "aggressive"  # System + tool results + user message only
+            elif iteration >= 10:
+                return "moderate"  # Drop old thinking blocks
+            else:
+                return "none"
     
-    def build_optimized_messages(self, current_messages, iteration):
+    def build_optimized_messages(self, current_messages, iteration, is_llama=False):
         """Build fresh message list from component streams."""
-        trim_level = self.should_trim_context(iteration)
+        trim_level = self.should_trim_context(iteration, is_llama)
         
         messages = []
         
@@ -709,6 +725,26 @@ class ContextManager:
             progress_note += "]"
             
             messages[0]["content"] += progress_note
+        
+        # Light trimming: keep only last 3 thinking blocks for Llama
+        if trim_level == "light":
+            # Minimal conversation history
+            if self.conversation_history:
+                messages.extend(self.conversation_history[-1:])
+            
+            # All tool results (they're compact)
+            for tool_msg in self.tool_results:
+                messages.append(tool_msg)
+            
+            # Only last 3 thinking messages from current_messages
+            thinking_messages = [m for m in current_messages if m.get("role") == "assistant" and extract_reasoning(m.get("content", ""))]
+            for think_msg in thinking_messages[-3:]:
+                messages.append(think_msg)
+            
+            # Current user message
+            messages.append({"role": "user", "content": self.user_message})
+            
+            return messages
         
         # Emergency mode: minimal context
         if trim_level == "emergency":
@@ -766,7 +802,21 @@ class ContextManager:
             return messages
         
         # No trimming: use current messages as-is but ensure system prompt is first
-        return current_messages
+        # However, still truncate any overly long content
+        cleaned_messages = []
+        for msg in current_messages:
+            if msg.get("role") == "system":
+                cleaned_messages.append(msg)
+            elif msg.get("role") == "tool":
+                # Keep tool messages compact
+                cleaned_msg = msg.copy()
+                if isinstance(msg.get("content"), str) and len(msg["content"]) > 1800:
+                    cleaned_msg["content"] = msg["content"][:1800]
+                cleaned_messages.append(cleaned_msg)
+            else:
+                cleaned_messages.append(msg)
+        
+        return cleaned_messages
     
     def inject_urgency(self, iteration, stuck_type=None):
         """Generate urgency message based on situation."""
@@ -880,17 +930,24 @@ async def run_research(channel, prompt, model_name, user_id):
 
     for iteration in range(30):
         # Check for stuck loops BEFORE API call
-        stuck_type = context_mgr.detect_stuck_loop(iteration)
+        stuck_type = context_mgr.detect_stuck_loop(iteration, is_llama=is_llama)
         if stuck_type:
             urgency_msg = context_mgr.inject_urgency(iteration, stuck_type)
             if urgency_msg:
                 messages.append({"role": "user", "content": urgency_msg})
                 print(f"🚨 Loop detected: {stuck_type} at iteration {iteration}")
         
-        # Progressive context optimization
-        if iteration >= 10:
-            messages = context_mgr.build_optimized_messages(messages, iteration)
+        # Progressive context optimization - start earlier for Llama
+        optimization_threshold = 6 if is_llama else 10
+        if iteration >= optimization_threshold:
+            messages = context_mgr.build_optimized_messages(messages, iteration, is_llama=is_llama)
             print(f"📊 Context optimized at iteration {iteration}: {len(str(messages))} chars")
+        
+        # Check context size and force emergency mode if needed
+        context_size = len(str(messages))
+        if context_size > 25000:  # Approximate token limit check
+            print(f"⚠️ Large context detected ({context_size} chars), forcing emergency mode")
+            messages = context_mgr.build_optimized_messages(messages, 20, is_llama=is_llama)
         
         try:
             response = groq_client.chat.completions.create(
@@ -911,9 +968,14 @@ async def run_research(channel, prompt, model_name, user_id):
                 })
                 continue
             elif "rate_limit" in error_msg.lower() or "413" in error_msg or "too large" in error_msg.lower():
-                await channel.send(f"⚠️ Context too large. Using emergency mode...")
-                # Force emergency mode trimming
-                messages = context_mgr.build_optimized_messages(messages, 25)
+                print(f"⚠️ Context too large error at iteration {iteration}")
+                # Force emergency mode trimming with even more aggressive approach
+                messages = context_mgr.build_optimized_messages(messages, 25, is_llama=is_llama)
+                # Also inject urgency to force completion
+                messages.append({
+                    "role": "user",
+                    "content": "CRITICAL: Context limit reached. Provide final answer NOW with available information."
+                })
                 continue
             else:
                 await channel.send(f"⚠️ API Error: {e}")
@@ -940,15 +1002,17 @@ async def run_research(channel, prompt, model_name, user_id):
                 elif "Synthesiz" in header or "synthesiz" in header.lower():
                     has_synthesis = True
             
-            if body and len(body) > 500:
-                body = body[:500] + "..."
+            # Truncate body for display and storage
+            max_body_length = 400 if is_llama else 500
+            if body and len(body) > max_body_length:
+                body = body[:max_body_length] + "..."
             
             if header and body:
                 thinking_section = f"🧠 **Thought**\n\n> **{header}**\n\n{body}"
             elif body:
-                thinking_section = f"🧠 **Thought**\n\n> {think[:500]}"
+                thinking_section = f"🧠 **Thought**\n\n> {think[:max_body_length]}"
             else:
-                thinking_section = f"🧠 **Thought**\n\n> {think[:500]}"
+                thinking_section = f"🧠 **Thought**\n\n> {think[:max_body_length]}"
             
             display_sections.append(thinking_section)
             await update_ui()
@@ -1083,11 +1147,13 @@ async def run_research(channel, prompt, model_name, user_id):
                 else:
                     result = "ERROR: Unknown function"
                 
+                # Truncate tool results more aggressively for Llama
+                max_tool_result = 1200 if is_llama else 1800
                 tool_result_msg = {
                     "role": "tool",
                     "tool_call_id": tool_call.id,
                     "name": fn_name,
-                    "content": str(result)[:1800]
+                    "content": str(result)[:max_tool_result]
                 }
                 messages.append(tool_result_msg)
                 
