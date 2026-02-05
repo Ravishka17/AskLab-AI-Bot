@@ -403,6 +403,75 @@ def clean_output(text):
 
     return text.strip()
 
+def is_simple_conversation(prompt):
+    lower = prompt.lower().strip()
+    simple_phrases = [
+        "tell me about yourself",
+        "who are you",
+        "what are you",
+        "what can you do",
+        "how are you",
+        "thanks",
+        "thank you",
+        "hello",
+        "hi",
+        "hey",
+        "help me",
+        "help",
+        "good morning",
+        "good evening"
+    ]
+    if any(phrase in lower for phrase in simple_phrases):
+        return True
+    if lower in {"hi", "hello", "hey", "thanks", "thank you"}:
+        return True
+    return False
+
+
+def determine_min_pages(prompt):
+    lower = prompt.lower()
+    if any(term in lower for term in ["in-depth", "detailed", "comprehensive", "deep dive", "complete overview"]):
+        return 3
+    if any(term in lower for term in ["compare", "difference", "history", "timeline", "overview", "impact", "analysis", "explain", "why", "how"]):
+        return 2
+    if any(term in lower for term in ["who is", "what is", "current", "latest", "when", "where"]):
+        return 1
+    return 2
+
+
+def add_iteration_budget(system_prompt, remaining, force_action=False):
+    urgency = "Call a research tool or answer now." if force_action else "Avoid repeated planning."
+    return (
+        f"{system_prompt}\n\n"
+        f"### ITERATION BUDGET\nRemaining iterations: {remaining}. {urgency}"
+    )
+
+
+def compact_messages(messages, max_chars=12000, keep_last=12, keep_tools=6):
+    system = messages[0]
+    filtered = []
+    for msg in messages[1:]:
+        if msg["role"] == "assistant" and msg.get("content"):
+            if re.search(r'<(?:think|thinking)>', msg["content"], re.IGNORECASE) and not msg.get("tool_calls"):
+                continue
+        filtered.append(msg)
+
+    if len(str([system] + filtered)) <= max_chars:
+        return [system] + filtered
+
+    trimmed = []
+    tool_kept = 0
+    for msg in reversed(filtered):
+        if msg["role"] == "tool":
+            tool_kept += 1
+        if len(trimmed) < keep_last or msg["role"] == "tool":
+            trimmed.append(msg)
+        if len(trimmed) >= keep_last and tool_kept >= keep_tools:
+            break
+
+    return [system] + list(reversed(trimmed))
+
+
 def convert_to_past_tense(sections):
     """Convert action verbs to past tense in completed reasoning."""
     converted = []
@@ -442,33 +511,33 @@ def get_system_prompt(model_name, has_memory=False):
             "### RESEARCH WORKFLOW\n"
             "1. <think>**Planning**\nStrategy</think>\n"
             "2. Call search_wikipedia (NO THINKING)\n"
-            "3. <think>List 2-3 pages as links</think>\n"
+            "3. <think>List 1-3 pages as links</think>\n"
             "4. Call get_wikipedia_page (NO THINKING)\n"
             "5. <think>Summarize facts</think>\n"
-            "6. Repeat for more pages\n"
+            "6. Read more pages only if needed\n"
             "7. <think>Synthesize findings</think>\n"
             "8. Final answer with citations\n\n"
             "### CRITICAL RULES\n"
             "- ONE ACTION PER RESPONSE: thinking OR tool, NEVER BOTH\n"
             "- Keep thinking under 400 chars\n"
-            "- Read at least 3 pages\n"
+            "- Read enough pages to answer (1 for simple facts, 2-3 for broader topics)\n"
         )
     else:
         return base_prompt + (
             "### RESEARCH WORKFLOW\n"
             "1. <think>**Planning**\nStrategy</think>\n"
             "2. Call search_wikipedia\n"
-            "3. <think>List 2-3 pages as links</think>\n"
+            "3. <think>List 1-3 pages as links</think>\n"
             "4. Call get_wikipedia_page\n"
             "5. <think>Summarize information</think>\n"
-            "6. Read more pages (at least 3 total)\n"
+            "6. Read more pages only if needed\n"
             "7. <think>Synthesize ALL information</think>\n"
             "8. Final answer with citations [1](URL)\n\n"
             "### CRITICAL RULES\n"
             "- List pages as: [Title](URL)\n"
             "- Cite inline like [1](URL)\n"
             "- Keep thinking under 600 chars\n"
-            "- Read at least 3 pages\n"
+            "- Read enough pages to answer (1 for simple facts, 2-3 for broader topics)\n"
         )
 
 # --- MODEL SELECTION VIEW ---
@@ -636,15 +705,29 @@ async def run_research(channel, prompt, model_name, user_id):
                     context_from_memory += "\n\n**Relevant Memories:**\n" + "\n".join(f"- {mem}" for mem in memory_texts)
     
     system_prompt = get_system_prompt(model_name, has_memory=(supermemory and supermemory.enabled))
+    simple_conversation = is_simple_conversation(prompt)
+    min_pages_required = determine_min_pages(prompt) if not simple_conversation else 0
     
     # Add memory context to system prompt if available
     if context_from_memory:
         system_prompt += f"\n\n### USER CONTEXT FROM MEMORY\n{context_from_memory}\n"
+
+    if simple_conversation:
+        system_prompt += (
+            "\n### MODE\n"
+            "This is a simple conversation request. Respond directly without research tools or planning."
+        )
+    else:
+        system_prompt += (
+            "\n### MODE\n"
+            "Use tools promptly for research. After one brief plan, call search_wikipedia."
+        )
     
+    base_system_prompt = system_prompt
     recent_context = conversation_history[cid][-4:] if conversation_history[cid] else []
     
     messages = [
-        {"role": "system", "content": system_prompt}
+        {"role": "system", "content": base_system_prompt}
     ] + recent_context + [
         {"role": "user", "content": prompt}
     ]
@@ -663,6 +746,7 @@ async def run_research(channel, prompt, model_name, user_id):
     pages_read = 0
     is_research_query = False
     is_llama = "llama" in model_name.lower()
+    consecutive_planning = 0
 
     async def update_ui(final=False):
         seen = set()
@@ -683,8 +767,14 @@ async def run_research(channel, prompt, model_name, user_id):
             pass
 
     for iteration in range(30):
-        if len(str(messages)) > 20000:
-            messages = [messages[0]] + messages[-12:]
+        remaining_iterations = 30 - iteration
+        force_action = consecutive_planning >= 2 and not simple_conversation
+        messages[0]["content"] = add_iteration_budget(
+            base_system_prompt,
+            remaining_iterations,
+            force_action=force_action
+        )
+        messages = compact_messages(messages, max_chars=12000)
         
         try:
             response = groq_client.chat.completions.create(
@@ -705,8 +795,8 @@ async def run_research(channel, prompt, model_name, user_id):
                 })
                 continue
             elif "rate_limit" in error_msg.lower() or "413" in error_msg or "too large" in error_msg.lower():
-                await channel.send(f"⚠️ Context too large. Trimming...")
-                messages = [messages[0]] + messages[-8:]
+                await channel.send("⚠️ Context too large. Trimming...")
+                messages = compact_messages(messages, max_chars=8000, keep_last=8, keep_tools=4)
                 continue
             else:
                 await channel.send(f"⚠️ API Error: {e}")
@@ -745,6 +835,39 @@ async def run_research(channel, prompt, model_name, user_id):
         
         if tool_calls:
             is_research_query = True
+            consecutive_planning = 0
+        else:
+            if think:
+                consecutive_planning += 1
+            else:
+                consecutive_planning = 0
+
+        if simple_conversation and tool_calls:
+            messages.append({"role": "assistant", "content": content})
+            messages.append({
+                "role": "user",
+                "content": "This is a simple conversation. Answer directly without tools or planning."
+            })
+            continue
+
+        if simple_conversation and think and not tool_calls:
+            messages.append({"role": "assistant", "content": content})
+            messages.append({
+                "role": "user",
+                "content": "Answer directly without planning or tools."
+            })
+            continue
+
+        if not simple_conversation and think and not tool_calls and consecutive_planning >= 2:
+            if consecutive_planning >= 4:
+                await channel.send("⚠️ Research stalled after repeated planning. Please try again.")
+                return
+            messages.append({"role": "assistant", "content": content})
+            nudge = "You have planned enough. Call search_wikipedia now or answer directly if no research is needed."
+            if consecutive_planning >= 3:
+                nudge = "Final warning: stop planning. Call search_wikipedia now or answer directly with no more <think>."
+            messages.append({"role": "user", "content": nudge})
+            continue
         
         if hallucinated and not tool_calls:
             messages.append({"role": "assistant", "content": content})
@@ -897,16 +1020,24 @@ async def run_research(channel, prompt, model_name, user_id):
         else:
             final_answer = clean_output(content)
             
-            if is_research_query:
-                if pages_read < 3 and not has_synthesis:
+            if is_research_query and not simple_conversation:
+                if pages_read == 0 and tool_call_count == 0 and final_answer.strip():
                     messages.append({"role": "assistant", "content": content})
                     messages.append({
                         "role": "user",
-                        "content": f"Read {3 - pages_read} more page(s)."
+                        "content": "Use search_wikipedia before answering."
+                    })
+                    continue
+
+                if pages_read < min_pages_required and not has_synthesis:
+                    messages.append({"role": "assistant", "content": content})
+                    messages.append({
+                        "role": "user",
+                        "content": f"Read {min_pages_required - pages_read} more page(s) if needed to answer."
                     })
                     continue
                 
-                if not has_synthesis and final_answer.strip() and pages_read >= 3:
+                if not has_synthesis and final_answer.strip() and pages_read >= min_pages_required and pages_read > 1:
                     messages.append({"role": "assistant", "content": content})
                     messages.append({
                         "role": "user",
@@ -955,7 +1086,11 @@ async def run_research(channel, prompt, model_name, user_id):
             
             # Update conversation history
             conversation_history[cid].append({"role": "user", "content": prompt})
-            conversation_history[cid].append({"role": "assistant", "content": final_answer[:400]})
+            assistant_summary = final_answer[:400]
+            if is_research_query and sources:
+                source_names = ", ".join(list(sources.keys())[:3])
+                assistant_summary = f"{assistant_summary}\nSources: {source_names}"
+            conversation_history[cid].append({"role": "assistant", "content": assistant_summary})
             
             # Trim conversation history
             if len(conversation_history[cid]) > 6:
