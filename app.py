@@ -594,6 +594,195 @@ async def on_message(message):
             selected_model = user_model_preferences.get(user_id, "moonshotai/kimi-k2-instruct-0905")
             await run_research(message.channel, prompt, selected_model, user_id)
 
+# --- CONTEXT MANAGER ---
+class ContextManager:
+    """Manages dual-track context architecture to prevent instruction dilution."""
+    
+    def __init__(self, system_prompt, user_message, conversation_history=None, max_tokens=8000):
+        self.system_prompt = system_prompt
+        self.user_message = user_message
+        self.conversation_history = conversation_history or []
+        self.max_tokens = max_tokens
+        
+        # Separate working memory streams
+        self.tool_results = []  # All tool results accumulated
+        self.thinking_blocks = []  # All thinking blocks
+        self.research_context = {}  # Sources, pages read, facts
+        
+        # Loop detection
+        self.consecutive_thoughts_without_tools = 0
+        self.last_thinking_themes = []  # Track thinking patterns
+        self.iterations_without_new_facts = 0
+        self.last_fact_count = 0
+    
+    def add_tool_result(self, tool_message):
+        """Add a tool result to research context."""
+        self.tool_results.append(tool_message)
+        self.consecutive_thoughts_without_tools = 0
+        
+    def add_thinking(self, content, has_tool_calls=False):
+        """Track thinking patterns for loop detection."""
+        if not has_tool_calls:
+            self.consecutive_thoughts_without_tools += 1
+        else:
+            self.consecutive_thoughts_without_tools = 0
+            # Reset theme tracking when action is taken
+            self.last_thinking_themes = []
+        
+        # Extract theme from thinking for pattern matching
+        thinking = extract_reasoning(content)
+        if thinking and not has_tool_calls:  # Only track themes when no action taken
+            self.thinking_blocks.append({
+                "iteration": len(self.thinking_blocks),
+                "content": thinking[:200],  # Store snippet
+                "theme": self._extract_theme(thinking)
+            })
+            self.last_thinking_themes.append(self._extract_theme(thinking))
+            if len(self.last_thinking_themes) > 3:
+                self.last_thinking_themes.pop(0)
+    
+    def _extract_theme(self, thinking):
+        """Extract semantic theme from thinking block."""
+        thinking_lower = thinking.lower()
+        if any(word in thinking_lower for word in ["plan", "strategy", "approach", "need to"]):
+            return "planning"
+        elif any(word in thinking_lower for word in ["synthesiz", "combin", "overall", "summary"]):
+            return "synthesis"
+        elif any(word in thinking_lower for word in ["search", "find", "look for"]):
+            return "search_intent"
+        elif any(word in thinking_lower for word in ["read", "article", "page"]):
+            return "read_intent"
+        else:
+            return "general"
+    
+    def detect_stuck_loop(self, iteration):
+        """Detect if AI is stuck in planning without action."""
+        # Pattern 1: Same theme repeated 3+ times (check first - more specific)
+        if len(self.last_thinking_themes) >= 3:
+            if self.last_thinking_themes[-1] == self.last_thinking_themes[-2] == self.last_thinking_themes[-3]:
+                if self.last_thinking_themes[-1] in ["planning", "search_intent"]:
+                    return "theme_loop"
+        
+        # Pattern 2: Multiple consecutive thoughts without tool calls (general fallback)
+        if self.consecutive_thoughts_without_tools >= 3:
+            return "repeated_planning"
+        
+        # Pattern 3: No new facts accumulated for 5+ iterations
+        current_fact_count = len(self.tool_results)
+        if iteration >= 5 and current_fact_count == self.last_fact_count:
+            self.iterations_without_new_facts += 1
+            if self.iterations_without_new_facts >= 5:
+                return "no_progress"
+        else:
+            self.iterations_without_new_facts = 0
+            self.last_fact_count = current_fact_count
+        
+        return None
+    
+    def should_trim_context(self, iteration):
+        """Progressive context trimming based on iteration."""
+        if iteration >= 20:
+            return "emergency"  # Minimal context only
+        elif iteration >= 15:
+            return "aggressive"  # System + tool results + user message only
+        elif iteration >= 10:
+            return "moderate"  # Drop old thinking blocks
+        else:
+            return "none"
+    
+    def build_optimized_messages(self, current_messages, iteration):
+        """Build fresh message list from component streams."""
+        trim_level = self.should_trim_context(iteration)
+        
+        messages = []
+        
+        # System prompt always first and complete
+        messages.append({"role": "system", "content": self.system_prompt})
+        
+        # Add progress markers to create urgency
+        if iteration >= 5:
+            progress_note = f"\n\n[PROGRESS: Iteration {iteration}/30"
+            if self.tool_results:
+                progress_note += f" | {len(self.tool_results)} tools used"
+            if self.research_context.get('pages_read', 0) > 0:
+                progress_note += f" | {self.research_context['pages_read']} pages read"
+            progress_note += "]"
+            
+            messages[0]["content"] += progress_note
+        
+        # Emergency mode: minimal context
+        if trim_level == "emergency":
+            # Only last 3 tool results
+            if self.tool_results:
+                for tool_msg in self.tool_results[-3:]:
+                    messages.append(tool_msg)
+            
+            # Inject urgency
+            messages.append({
+                "role": "user",
+                "content": f"[EMERGENCY: {30-iteration} iterations remaining. Synthesize and provide final answer NOW.]"
+            })
+            
+            # Current user message
+            messages.append({"role": "user", "content": self.user_message})
+            
+            return messages
+        
+        # Aggressive trimming: drop all thinking
+        if trim_level == "aggressive":
+            # All tool results (compact)
+            for tool_msg in self.tool_results:
+                messages.append(tool_msg)
+            
+            # Inject urgency
+            messages.append({
+                "role": "user", 
+                "content": f"[{30-iteration} iterations left. Complete your answer with citations.]"
+            })
+            
+            # Current user message
+            messages.append({"role": "user", "content": self.user_message})
+            
+            return messages
+        
+        # Moderate trimming: keep only recent thinking
+        if trim_level == "moderate":
+            # Keep conversation history minimal
+            if self.conversation_history:
+                messages.extend(self.conversation_history[-2:])
+            
+            # All tool results
+            for tool_msg in self.tool_results:
+                messages.append(tool_msg)
+            
+            # Only last 2 thinking blocks from current_messages
+            thinking_messages = [m for m in current_messages if m.get("role") == "assistant" and extract_reasoning(m.get("content", ""))]
+            for think_msg in thinking_messages[-2:]:
+                messages.append(think_msg)
+            
+            # Current user message
+            messages.append({"role": "user", "content": self.user_message})
+            
+            return messages
+        
+        # No trimming: use current messages as-is but ensure system prompt is first
+        return current_messages
+    
+    def inject_urgency(self, iteration, stuck_type=None):
+        """Generate urgency message based on situation."""
+        if stuck_type == "repeated_planning":
+            return "ERROR: Stop planning. Execute tool calls NOW. No more thinking without action."
+        elif stuck_type == "theme_loop":
+            return "ERROR: You're repeating yourself. Take action immediately - use tools or provide final answer."
+        elif stuck_type == "no_progress":
+            return "ERROR: No progress detected. Use tools to gather information or synthesize findings."
+        elif iteration >= 20:
+            return f"CRITICAL: Only {30-iteration} iterations left. Provide final answer with citations immediately."
+        elif iteration >= 15:
+            return f"URGENT: {30-iteration} iterations remaining. Complete synthesis and answer."
+        else:
+            return None
+
 async def run_research(channel, prompt, model_name, user_id):
     cid = channel.id
     container_tag = str(user_id)  # Using user_id as container tag
@@ -643,6 +832,13 @@ async def run_research(channel, prompt, model_name, user_id):
     
     recent_context = conversation_history[cid][-4:] if conversation_history[cid] else []
     
+    # Initialize context manager
+    context_mgr = ContextManager(
+        system_prompt=system_prompt,
+        user_message=prompt,
+        conversation_history=recent_context
+    )
+    
     messages = [
         {"role": "system", "content": system_prompt}
     ] + recent_context + [
@@ -683,8 +879,18 @@ async def run_research(channel, prompt, model_name, user_id):
             pass
 
     for iteration in range(30):
-        if len(str(messages)) > 20000:
-            messages = [messages[0]] + messages[-12:]
+        # Check for stuck loops BEFORE API call
+        stuck_type = context_mgr.detect_stuck_loop(iteration)
+        if stuck_type:
+            urgency_msg = context_mgr.inject_urgency(iteration, stuck_type)
+            if urgency_msg:
+                messages.append({"role": "user", "content": urgency_msg})
+                print(f"🚨 Loop detected: {stuck_type} at iteration {iteration}")
+        
+        # Progressive context optimization
+        if iteration >= 10:
+            messages = context_mgr.build_optimized_messages(messages, iteration)
+            print(f"📊 Context optimized at iteration {iteration}: {len(str(messages))} chars")
         
         try:
             response = groq_client.chat.completions.create(
@@ -705,8 +911,9 @@ async def run_research(channel, prompt, model_name, user_id):
                 })
                 continue
             elif "rate_limit" in error_msg.lower() or "413" in error_msg or "too large" in error_msg.lower():
-                await channel.send(f"⚠️ Context too large. Trimming...")
-                messages = [messages[0]] + messages[-8:]
+                await channel.send(f"⚠️ Context too large. Using emergency mode...")
+                # Force emergency mode trimming
+                messages = context_mgr.build_optimized_messages(messages, 25)
                 continue
             else:
                 await channel.send(f"⚠️ API Error: {e}")
@@ -716,6 +923,11 @@ async def run_research(channel, prompt, model_name, user_id):
         content = msg.content or ""
         
         hallucinated = re.search(r'<function[^>]*>|(?:search_wikipedia|get_wikipedia_page|search_memory)\s*\(|\{\s*"query":', content, re.IGNORECASE)
+        
+        tool_calls = msg.tool_calls
+        
+        # Track in context manager for loop detection
+        context_mgr.add_thinking(content, has_tool_calls=bool(tool_calls))
         
         think = extract_reasoning(content)
         if think:
@@ -740,8 +952,6 @@ async def run_research(channel, prompt, model_name, user_id):
             
             display_sections.append(thinking_section)
             await update_ui()
-
-        tool_calls = msg.tool_calls
         
         if tool_calls:
             is_research_query = True
@@ -756,21 +966,6 @@ async def run_research(channel, prompt, model_name, user_id):
             messages.append({
                 "role": "user",
                 "content": "ERROR: NEVER combine <think> and tool calls."
-            })
-            continue
-        
-        if not has_planning and tool_calls and iteration == 0:
-            messages.append({
-                "role": "assistant",
-                "content": content,
-                "tool_calls": [
-                    {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
-                    for tc in tool_calls
-                ]
-            })
-            messages.append({
-                "role": "user",
-                "content": "ERROR: Start with <think>**Planning**</think> FIRST."
             })
             continue
         
@@ -884,33 +1079,31 @@ async def run_research(channel, prompt, model_name, user_id):
                     else:
                         pages_read += 1
                         sources[title] = wiki_url
+                        context_mgr.research_context['pages_read'] = pages_read
                 else:
                     result = "ERROR: Unknown function"
                 
-                messages.append({
+                tool_result_msg = {
                     "role": "tool",
                     "tool_call_id": tool_call.id,
                     "name": fn_name,
                     "content": str(result)[:1800]
-                })
+                }
+                messages.append(tool_result_msg)
+                
+                # Track in context manager
+                context_mgr.add_tool_result(tool_result_msg)
         
         else:
             final_answer = clean_output(content)
             
             if is_research_query:
-                if pages_read < 3 and not has_synthesis:
+                # Intelligent minimum pages check
+                if pages_read < 3:
                     messages.append({"role": "assistant", "content": content})
                     messages.append({
                         "role": "user",
-                        "content": f"Read {3 - pages_read} more page(s)."
-                    })
-                    continue
-                
-                if not has_synthesis and final_answer.strip() and pages_read >= 3:
-                    messages.append({"role": "assistant", "content": content})
-                    messages.append({
-                        "role": "user",
-                        "content": "Use <think> to synthesize findings briefly."
+                        "content": f"Read {3 - pages_read} more page(s) for comprehensive answer."
                     })
                     continue
             
