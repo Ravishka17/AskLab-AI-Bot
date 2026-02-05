@@ -439,20 +439,23 @@ def get_system_prompt(model_name, has_memory=False):
     
     if "llama" in model_name.lower():
         return base_prompt + (
-            "### RESEARCH WORKFLOW\n"
-            "1. <think>**Planning**\nStrategy (max 300 chars)</think>\n"
-            "2. Call search_wikipedia\n"
-            "3. <think>List pages as [Title](URL)</think>\n"
-            "4. Call get_wikipedia_page\n"
-            "5. <think>Key facts</think>\n"
-            "6. Repeat steps 4-5 (read 3+ pages)\n"
-            "7. <think>Final synthesis</think>\n"
-            "8. Answer with inline citations [1](URL)\n\n"
+            "### RESEARCH WORKFLOW (COMPACT - MAX 12 STEPS)\n"
+            "1. <think>Strategy (50 chars max)</think>\n"
+            "2. search_wikipedia\n"
+            "3. <think>Pick 2 best pages</think>\n"
+            "4. get_wikipedia_page (page 1)\n"
+            "5. <think>Facts (50 chars)</think>\n"
+            "6. get_wikipedia_page (page 2)\n"
+            "7. <think>Facts (50 chars)</think>\n"
+            "8. get_wikipedia_page (page 3 if needed)\n"
+            "9. <think>Synthesis (80 chars)</think>\n"
+            "10. Answer with citations\n\n"
             "### CRITICAL RULES\n"
-            "- ONE ACTION PER RESPONSE: <think> OR tool call, NEVER BOTH\n"
-            "- Keep ALL thinking under 300 chars (compact!)\n"
-            "- Minimum 3 pages before answering\n"
-            "- Use compact thinking - just key points\n"
+            "- ONE ACTION PER RESPONSE: <think> OR tool, NEVER BOTH\n"
+            "- ALL thinking MUST be under 80 chars (bullet points only!)\n"
+            "- 2-3 pages minimum before answering\n"
+            "- NO explanations in thinking - just facts/decisions\n"
+            "- Complete within 15 iterations total\n"
         )
     else:
         return base_prompt + (
@@ -665,22 +668,26 @@ class ContextManager:
                     return "theme_loop"
         
         # Pattern 2: Multiple consecutive thoughts without tool calls (general fallback)
-        # For Llama, be more lenient as it alternates between thinking and tool calls
-        threshold = 4 if is_llama else 3
+        # For Llama, be more strict to force faster completion
+        threshold = 3 if is_llama else 3
         if self.consecutive_thoughts_without_tools >= threshold:
             return "repeated_planning"
         
-        # Pattern 3: No new facts accumulated - be more lenient for Llama
+        # Pattern 3: No new facts accumulated - be stricter for Llama to force completion
         current_fact_count = len(self.tool_results)
-        if iteration >= 8 and current_fact_count == self.last_fact_count:
+        if iteration >= 6 and current_fact_count == self.last_fact_count:
             self.iterations_without_new_facts += 1
-            # For Llama, allow more iterations without progress since it alternates
-            threshold = 8 if is_llama else 5
+            # For Llama, be stricter to force completion sooner
+            threshold = 4 if is_llama else 5
             if self.iterations_without_new_facts >= threshold:
                 return "no_progress"
         else:
             self.iterations_without_new_facts = 0
             self.last_fact_count = current_fact_count
+        
+        # Pattern 4: Force completion after sufficient research for Llama
+        if is_llama and iteration >= 12 and current_fact_count >= 3:
+            return "sufficient_research"
         
         return None
     
@@ -688,11 +695,11 @@ class ContextManager:
         """Progressive context trimming based on iteration."""
         # Llama needs more aggressive trimming due to the alternating pattern
         if is_llama:
-            if iteration >= 15:
+            if iteration >= 12:
                 return "emergency"  # Minimal context only
-            elif iteration >= 10:
+            elif iteration >= 8:
                 return "aggressive"  # System + tool results + user message only
-            elif iteration >= 6:
+            elif iteration >= 5:
                 return "moderate"  # Drop old thinking blocks
             else:
                 return "light"  # Keep only recent thinking
@@ -716,8 +723,9 @@ class ContextManager:
         messages.append({"role": "system", "content": self.system_prompt})
         
         # Add progress markers to create urgency
+        max_iter = 18 if is_llama else 30  # Match the max_iterations in run_research
         if iteration >= 5:
-            progress_note = f"\n\n[PROGRESS: Iteration {iteration}/30"
+            progress_note = f"\n\n[PROGRESS: Iteration {iteration}/{max_iter}"
             if self.tool_results:
                 progress_note += f" | {len(self.tool_results)} tools used"
             if self.research_context.get('pages_read', 0) > 0:
@@ -748,9 +756,10 @@ class ContextManager:
         
         # Emergency mode: minimal context
         if trim_level == "emergency":
-            # Only last 3 tool results
+            # Only last 2 tool results for Llama (more aggressive)
+            result_count = 2 if is_llama else 3
             if self.tool_results:
-                for tool_msg in self.tool_results[-3:]:
+                for tool_msg in self.tool_results[-result_count:]:
                     messages.append(tool_msg)
             
             # Inject urgency
@@ -818,7 +827,7 @@ class ContextManager:
         
         return cleaned_messages
     
-    def inject_urgency(self, iteration, stuck_type=None):
+    def inject_urgency(self, iteration, stuck_type=None, max_iterations=30):
         """Generate urgency message based on situation."""
         if stuck_type == "repeated_planning":
             return "ERROR: Stop planning. Execute tool calls NOW. No more thinking without action."
@@ -826,10 +835,12 @@ class ContextManager:
             return "ERROR: You're repeating yourself. Take action immediately - use tools or provide final answer."
         elif stuck_type == "no_progress":
             return "ERROR: No progress detected. Use tools to gather information or synthesize findings."
-        elif iteration >= 20:
-            return f"CRITICAL: Only {30-iteration} iterations left. Provide final answer with citations immediately."
-        elif iteration >= 15:
-            return f"URGENT: {30-iteration} iterations remaining. Complete synthesis and answer."
+        elif stuck_type == "sufficient_research":
+            return "COMPLETE: You have enough information. Provide final answer with citations NOW."
+        elif iteration >= max_iterations * 0.67:  # 67% through iterations
+            return f"CRITICAL: Only {max_iterations-iteration} iterations left. Provide final answer with citations immediately."
+        elif iteration >= max_iterations * 0.5:  # 50% through iterations
+            return f"URGENT: {max_iterations-iteration} iterations remaining. Complete synthesis and answer."
         else:
             return None
 
@@ -928,17 +939,20 @@ async def run_research(channel, prompt, model_name, user_id):
         except:
             pass
 
-    for iteration in range(30):
+    # Model-specific iteration limits
+    max_iterations = 18 if is_llama else 30
+    
+    for iteration in range(max_iterations):
         # Check for stuck loops BEFORE API call
         stuck_type = context_mgr.detect_stuck_loop(iteration, is_llama=is_llama)
         if stuck_type:
-            urgency_msg = context_mgr.inject_urgency(iteration, stuck_type)
+            urgency_msg = context_mgr.inject_urgency(iteration, stuck_type, max_iterations)
             if urgency_msg:
                 messages.append({"role": "user", "content": urgency_msg})
                 print(f"🚨 Loop detected: {stuck_type} at iteration {iteration}")
         
         # Progressive context optimization - start earlier for Llama
-        optimization_threshold = 6 if is_llama else 10
+        optimization_threshold = 4 if is_llama else 10
         if iteration >= optimization_threshold:
             messages = context_mgr.build_optimized_messages(messages, iteration, is_llama=is_llama)
             print(f"📊 Context optimized at iteration {iteration}: {len(str(messages))} chars")
@@ -1003,7 +1017,7 @@ async def run_research(channel, prompt, model_name, user_id):
                     has_synthesis = True
             
             # Truncate body for display and storage
-            max_body_length = 400 if is_llama else 500
+            max_body_length = 150 if is_llama else 500
             if body and len(body) > max_body_length:
                 body = body[:max_body_length] + "..."
             
@@ -1148,7 +1162,7 @@ async def run_research(channel, prompt, model_name, user_id):
                     result = "ERROR: Unknown function"
                 
                 # Truncate tool results more aggressively for Llama
-                max_tool_result = 1200 if is_llama else 1800
+                max_tool_result = 800 if is_llama else 1800
                 tool_result_msg = {
                     "role": "tool",
                     "tool_call_id": tool_call.id,
@@ -1164,12 +1178,13 @@ async def run_research(channel, prompt, model_name, user_id):
             final_answer = clean_output(content)
             
             if is_research_query:
-                # Intelligent minimum pages check
-                if pages_read < 3:
+                # Model-aware minimum pages check
+                min_pages = 2 if is_llama else 3
+                if pages_read < min_pages:
                     messages.append({"role": "assistant", "content": content})
                     messages.append({
                         "role": "user",
-                        "content": f"Read {3 - pages_read} more page(s) for comprehensive answer."
+                        "content": f"Read {min_pages - pages_read} more page(s) for comprehensive answer."
                     })
                     continue
             
