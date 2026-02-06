@@ -212,11 +212,11 @@ supermemory = SupermemoryClient(SUPERMEMORY_API_KEY) if SUPERMEMORY_API_KEY else
 # --- TOOL DEFINITIONS ---
 def get_tools_for_model(model_name, include_memory=False):
     """Get tool definitions based on model type."""
-    # GPT-OSS models use Groq's built-in tools (web search, code execution)
+    # GPT-OSS models use Groq's built-in tools (browser_search, code_interpreter)
     if "gpt-oss" in model_name.lower():
         tools = [
-            {"type": "web_search"},
-            {"type": "code_execution"}
+            {"type": "browser_search"},
+            {"type": "code_interpreter"}
         ]
         
         # Add memory search for GPT-OSS if enabled
@@ -471,15 +471,15 @@ def get_system_prompt(model_name, has_memory=False):
         return base_prompt + (
             "### BUILT-IN TOOLS\n"
             "You have access to powerful built-in tools:\n"
-            "- **web_search**: Search the web for current information\n"
-            "- **code_execution**: Execute Python code for calculations and analysis\n\n"
+            "- **browser_search**: Search the web for current information\n"
+            "- **code_interpreter**: Execute Python code for calculations and analysis\n\n"
             "### RESEARCH WORKFLOW\n"
-            "1. For factual questions: Use web_search to find current information\n"
-            "2. For calculations: Use code_execution to run Python code\n"
+            "1. For factual questions: Use browser_search to find current information\n"
+            "2. For calculations: Use code_interpreter to run Python code\n"
             "3. Synthesize findings into a clear answer with citations\n\n"
             "### CRITICAL RULES\n"
-            "- Use web_search for factual, current information\n"
-            "- Use code_execution for math, data analysis, and computations\n"
+            "- Use browser_search for factual, current information\n"
+            "- Use code_interpreter for math, data analysis, and computations\n"
             "- Cite sources from web search results\n"
             "- Provide clear, comprehensive answers\n"
         )
@@ -1123,15 +1123,15 @@ async def run_research(channel, prompt, model_name, user_id):
                     await update_ui()
                     continue
                 
-                # Check if this is a built-in tool (web_search, code_execution)
-                is_builtin_tool = tool_call.type in ["web_search", "code_execution"]
+                # Check if this is a built-in tool (browser_search, code_interpreter)
+                is_builtin_tool = tool_call.type in ["browser_search", "code_interpreter"]
                 
                 if is_builtin_tool:
                     # Built-in tools are handled automatically by Groq
                     # We just need to display them in the UI
                     tool_type = tool_call.type
                     
-                    if tool_type == "web_search":
+                    if tool_type == "browser_search":
                         # Extract query from tool call if available
                         query_display = "Searching the web..."
                         try:
@@ -1143,7 +1143,7 @@ async def run_research(channel, prompt, model_name, user_id):
                         
                         display_sections.append(f"🔍 **Web Search**\n\n> {query_display}")
                         await update_ui()
-                    elif tool_type == "code_execution":
+                    elif tool_type == "code_interpreter":
                         display_sections.append(f"💻 **Code Execution**\n\n> Running Python code...")
                         await update_ui()
                     
@@ -1256,7 +1256,7 @@ async def run_research(channel, prompt, model_name, user_id):
         else:
             final_answer = clean_output(content)
             
-            # For Kimi K2, check minimum pages (GPT-OSS uses web_search instead)
+            # For Kimi K2, check minimum pages (GPT-OSS uses browser_search instead)
             if is_research_query and not is_gpt_oss:
                 min_pages = 3
                 if pages_read < min_pages:
