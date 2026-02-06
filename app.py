@@ -1000,13 +1000,14 @@ async def run_research(channel, prompt, model_name, user_id):
                 "max_tokens": 2000
             }
             
-            # GPT-OSS models support reasoning format and built-in tools
+            # GPT-OSS models support reasoning and built-in tools
             if is_gpt_oss:
                 # Use Groq's built-in tools
                 api_params["tools"] = get_tools_for_model(model_name, include_memory=(supermemory and supermemory.enabled))
-                # Enable reasoning format for GPT-OSS
-                api_params["reasoning_format"] = "parsed"
+                # Enable reasoning for GPT-OSS (reasoning_format is NOT supported by GPT-OSS)
+                # Only use include_reasoning parameter as per Groq documentation
                 api_params["include_reasoning"] = True
+                # Note: reasoning_format and include_reasoning are mutually exclusive
                 # Note: cacheable property is not supported by openai/gpt-oss-120b
             else:
                 # Kimi K2 uses custom tools and traditional format
@@ -1035,9 +1036,10 @@ async def run_research(channel, prompt, model_name, user_id):
         content = msg.content or ""
         
         # Handle reasoning content from GPT-OSS models
+        # Per Groq docs, reasoning is in the 'reasoning' field when include_reasoning=True
         reasoning_content = None
-        if is_gpt_oss and hasattr(msg, 'reasoning_content') and msg.reasoning_content:
-            reasoning_content = msg.reasoning_content
+        if is_gpt_oss and hasattr(msg, 'reasoning') and msg.reasoning:
+            reasoning_content = msg.reasoning
             # Display reasoning in UI
             reasoning_section = f"🧠 **Reasoning**\n\n> {reasoning_content[:500]}"
             if len(reasoning_content) > 500:
