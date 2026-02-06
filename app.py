@@ -1007,9 +1007,7 @@ async def run_research(channel, prompt, model_name, user_id):
                 # Enable reasoning format for GPT-OSS
                 api_params["reasoning_format"] = "parsed"
                 api_params["include_reasoning"] = True
-                # Enable prompt caching for better performance
-                if len(messages) > 1 and messages[0].get("role") == "system":
-                    messages[0]["cacheable"] = True
+                # Note: cacheable property is not supported by openai/gpt-oss-120b
             else:
                 # Kimi K2 uses custom tools and traditional format
                 api_params["tools"] = get_tools_for_model(model_name, include_memory=(supermemory and supermemory.enabled))
