@@ -30,7 +30,7 @@ WIKI_HEADERS = {"User-Agent": "AskLabBot/2.0 (contact: admin@asklab.ai) aiohttp/
 
 # Available models
 AVAILABLE_MODELS = {
-    "Llama 3.3 70B": "llama-3.3-70b-versatile",
+    "GPT-OSS 120B": "openai/gpt-oss-120b",
     "Kimi K2 Instruct": "moonshotai/kimi-k2-instruct-0905"
 }
 
@@ -210,8 +210,38 @@ class SupermemoryClient:
 supermemory = SupermemoryClient(SUPERMEMORY_API_KEY) if SUPERMEMORY_API_KEY else None
 
 # --- TOOL DEFINITIONS ---
-def get_tools(include_memory=False):
-    """Get tool definitions, optionally including memory search."""
+def get_tools_for_model(model_name, include_memory=False):
+    """Get tool definitions based on model type."""
+    # GPT-OSS models use Groq's built-in tools (browser_search, code_interpreter)
+    if "gpt-oss" in model_name.lower():
+        tools = [
+            {"type": "browser_search"},
+            {"type": "code_interpreter"}
+        ]
+        
+        # Add memory search for GPT-OSS if enabled
+        if include_memory:
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "search_memory",
+                    "description": "Search past conversations and research results from your memory.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "What to search for in memory (e.g., 'python tutorial', 'last week discussion')"
+                            }
+                        },
+                        "required": ["query"]
+                    }
+                }
+            })
+        
+        return tools
+    
+    # Kimi K2 uses custom Wikipedia tools
     base_tools = [
         {
             "type": "function",
@@ -437,23 +467,24 @@ def get_system_prompt(model_name, has_memory=False):
         + memory_instruction
     )
     
-    if "llama" in model_name.lower():
+    if "gpt-oss" in model_name.lower():
         return base_prompt + (
+            "### BUILT-IN TOOLS\n"
+            "You have access to powerful built-in tools:\n"
+            "- **browser_search**: Search the web for current information\n"
+            "- **code_interpreter**: Execute Python code for calculations and analysis\n\n"
             "### RESEARCH WORKFLOW\n"
-            "1. <think>**Planning**\nStrategy</think>\n"
-            "2. Call search_wikipedia (NO THINKING)\n"
-            "3. <think>List 2-3 pages as links</think>\n"
-            "4. Call get_wikipedia_page (NO THINKING)\n"
-            "5. <think>Summarize facts</think>\n"
-            "6. Repeat for more pages\n"
-            "7. <think>Synthesize findings</think>\n"
-            "8. Final answer with citations\n\n"
+            "1. For factual questions: Use browser_search to find current information\n"
+            "2. For calculations: Use code_interpreter to run Python code\n"
+            "3. Synthesize findings into a clear answer with citations\n\n"
             "### CRITICAL RULES\n"
-            "- ONE ACTION PER RESPONSE: thinking OR tool, NEVER BOTH\n"
-            "- Keep thinking under 400 chars\n"
-            "- Read at least 3 pages\n"
+            "- Use browser_search for factual, current information\n"
+            "- Use code_interpreter for math, data analysis, and computations\n"
+            "- Cite sources from web search results\n"
+            "- Provide clear, comprehensive answers\n"
         )
     else:
+        # Kimi K2 Instruct system prompt
         return base_prompt + (
             "### RESEARCH WORKFLOW\n"
             "1. <think>**Planning**\nStrategy</think>\n"
@@ -482,10 +513,10 @@ class ModelDropdown(discord.ui.Select):
     def __init__(self, user_id):
         options = [
             discord.SelectOption(
-                label="Llama 3.3 70B",
-                description="Fast and versatile",
-                value="llama-3.3-70b-versatile",
-                emoji="🦙"
+                label="GPT-OSS 120B",
+                description="Advanced reasoning with web search",
+                value="openai/gpt-oss-120b",
+                emoji="🧠"
             ),
             discord.SelectOption(
                 label="Kimi K2 Instruct",
@@ -522,7 +553,7 @@ class ModelDropdown(discord.ui.Select):
 @bot.tree.command(name="model", description="Select AI model")
 async def select_model(interaction: discord.Interaction):
     view = ModelSelectView(interaction.user.id)
-    current_model = user_model_preferences.get(interaction.user.id, "moonshotai/kimi-k2-instruct-0905")
+    current_model = user_model_preferences.get(interaction.user.id, "openai/gpt-oss-120b")
     model_names = {v: k for k, v in AVAILABLE_MODELS.items()}
     current_display = model_names.get(current_model, current_model)
     
@@ -591,8 +622,254 @@ async def on_message(message):
         prompt = message.content.replace(f'<@{bot.user.id}>', '').strip()
         if prompt:
             user_id = message.author.id
-            selected_model = user_model_preferences.get(user_id, "moonshotai/kimi-k2-instruct-0905")
+            selected_model = user_model_preferences.get(user_id, "openai/gpt-oss-120b")
             await run_research(message.channel, prompt, selected_model, user_id)
+
+# --- CONTEXT MANAGER ---
+class ContextManager:
+    """Manages dual-track context architecture to prevent instruction dilution."""
+    
+    def __init__(self, system_prompt, user_message, conversation_history=None, max_tokens=8000):
+        self.system_prompt = system_prompt
+        self.user_message = user_message
+        self.conversation_history = conversation_history or []
+        self.max_tokens = max_tokens
+        
+        # Separate working memory streams
+        self.tool_results = []  # All tool results accumulated
+        self.thinking_blocks = []  # All thinking blocks
+        self.research_context = {}  # Sources, pages read, facts
+        
+        # Loop detection
+        self.consecutive_thoughts_without_tools = 0
+        self.last_thinking_themes = []  # Track thinking patterns
+        self.iterations_without_new_facts = 0
+        self.last_fact_count = 0
+    
+    def add_tool_result(self, tool_message):
+        """Add a tool result to research context."""
+        self.tool_results.append(tool_message)
+        self.consecutive_thoughts_without_tools = 0
+        
+    def add_thinking(self, content, has_tool_calls=False):
+        """Track thinking patterns for loop detection."""
+        if not has_tool_calls:
+            self.consecutive_thoughts_without_tools += 1
+        else:
+            self.consecutive_thoughts_without_tools = 0
+            # Reset theme tracking when action is taken
+            self.last_thinking_themes = []
+        
+        # Extract theme from thinking for pattern matching
+        thinking = extract_reasoning(content)
+        if thinking and not has_tool_calls:  # Only track themes when no action taken
+            self.thinking_blocks.append({
+                "iteration": len(self.thinking_blocks),
+                "content": thinking[:200],  # Store snippet
+                "theme": self._extract_theme(thinking)
+            })
+            self.last_thinking_themes.append(self._extract_theme(thinking))
+            if len(self.last_thinking_themes) > 3:
+                self.last_thinking_themes.pop(0)
+    
+    def _extract_theme(self, thinking):
+        """Extract semantic theme from thinking block."""
+        thinking_lower = thinking.lower()
+        if any(word in thinking_lower for word in ["plan", "strategy", "approach", "need to"]):
+            return "planning"
+        elif any(word in thinking_lower for word in ["synthesiz", "combin", "overall", "summary"]):
+            return "synthesis"
+        elif any(word in thinking_lower for word in ["search", "find", "look for"]):
+            return "search_intent"
+        elif any(word in thinking_lower for word in ["read", "article", "page"]):
+            return "read_intent"
+        else:
+            return "general"
+    
+    def detect_stuck_loop(self, iteration, is_llama=False):
+        """Detect if AI is stuck in planning without action."""
+        # Pattern 1: Same theme repeated 3+ times (check first - more specific)
+        if len(self.last_thinking_themes) >= 3:
+            if self.last_thinking_themes[-1] == self.last_thinking_themes[-2] == self.last_thinking_themes[-3]:
+                if self.last_thinking_themes[-1] in ["planning", "search_intent"]:
+                    return "theme_loop"
+        
+        # Pattern 2: Multiple consecutive thoughts without tool calls (general fallback)
+        # For Llama, be more strict to force faster completion
+        threshold = 3 if is_llama else 3
+        if self.consecutive_thoughts_without_tools >= threshold:
+            return "repeated_planning"
+        
+        # Pattern 3: No new facts accumulated - be stricter for Llama to force completion
+        current_fact_count = len(self.tool_results)
+        if iteration >= 6 and current_fact_count == self.last_fact_count:
+            self.iterations_without_new_facts += 1
+            # For Llama, be stricter to force completion sooner
+            threshold = 4 if is_llama else 5
+            if self.iterations_without_new_facts >= threshold:
+                return "no_progress"
+        else:
+            self.iterations_without_new_facts = 0
+            self.last_fact_count = current_fact_count
+        
+        # Pattern 4: Force completion after sufficient research for Llama
+        if is_llama and iteration >= 12 and current_fact_count >= 3:
+            return "sufficient_research"
+        
+        return None
+    
+    def should_trim_context(self, iteration, is_llama=False):
+        """Progressive context trimming based on iteration."""
+        # Llama needs more aggressive trimming due to the alternating pattern
+        if is_llama:
+            if iteration >= 12:
+                return "emergency"  # Minimal context only
+            elif iteration >= 8:
+                return "aggressive"  # System + tool results + user message only
+            elif iteration >= 5:
+                return "moderate"  # Drop old thinking blocks
+            else:
+                return "light"  # Keep only recent thinking
+        else:
+            if iteration >= 20:
+                return "emergency"  # Minimal context only
+            elif iteration >= 15:
+                return "aggressive"  # System + tool results + user message only
+            elif iteration >= 10:
+                return "moderate"  # Drop old thinking blocks
+            else:
+                return "none"
+    
+    def build_optimized_messages(self, current_messages, iteration, is_llama=False):
+        """Build fresh message list from component streams."""
+        trim_level = self.should_trim_context(iteration, is_llama)
+        
+        messages = []
+        
+        # System prompt always first and complete
+        messages.append({"role": "system", "content": self.system_prompt})
+        
+        # Add progress markers to create urgency
+        max_iter = 18 if is_llama else 30  # Match the max_iterations in run_research
+        if iteration >= 5:
+            progress_note = f"\n\n[PROGRESS: Iteration {iteration}/{max_iter}"
+            if self.tool_results:
+                progress_note += f" | {len(self.tool_results)} tools used"
+            if self.research_context.get('pages_read', 0) > 0:
+                progress_note += f" | {self.research_context['pages_read']} pages read"
+            progress_note += "]"
+            
+            messages[0]["content"] += progress_note
+        
+        # Light trimming: keep only last 3 thinking blocks for Llama
+        if trim_level == "light":
+            # Minimal conversation history
+            if self.conversation_history:
+                messages.extend(self.conversation_history[-1:])
+            
+            # All tool results (they're compact)
+            for tool_msg in self.tool_results:
+                messages.append(tool_msg)
+            
+            # Only last 3 thinking messages from current_messages
+            thinking_messages = [m for m in current_messages if m.get("role") == "assistant" and extract_reasoning(m.get("content", ""))]
+            for think_msg in thinking_messages[-3:]:
+                messages.append(think_msg)
+            
+            # Current user message
+            messages.append({"role": "user", "content": self.user_message})
+            
+            return messages
+        
+        # Emergency mode: minimal context
+        if trim_level == "emergency":
+            # Only last 2 tool results for Llama (more aggressive)
+            result_count = 2 if is_llama else 3
+            if self.tool_results:
+                for tool_msg in self.tool_results[-result_count:]:
+                    messages.append(tool_msg)
+            
+            # Inject urgency
+            messages.append({
+                "role": "user",
+                "content": f"[EMERGENCY: {30-iteration} iterations remaining. Synthesize and provide final answer NOW.]"
+            })
+            
+            # Current user message
+            messages.append({"role": "user", "content": self.user_message})
+            
+            return messages
+        
+        # Aggressive trimming: drop all thinking
+        if trim_level == "aggressive":
+            # All tool results (compact)
+            for tool_msg in self.tool_results:
+                messages.append(tool_msg)
+            
+            # Inject urgency
+            messages.append({
+                "role": "user", 
+                "content": f"[{30-iteration} iterations left. Complete your answer with citations.]"
+            })
+            
+            # Current user message
+            messages.append({"role": "user", "content": self.user_message})
+            
+            return messages
+        
+        # Moderate trimming: keep only recent thinking
+        if trim_level == "moderate":
+            # Keep conversation history minimal
+            if self.conversation_history:
+                messages.extend(self.conversation_history[-2:])
+            
+            # All tool results
+            for tool_msg in self.tool_results:
+                messages.append(tool_msg)
+            
+            # Only last 2 thinking blocks from current_messages
+            thinking_messages = [m for m in current_messages if m.get("role") == "assistant" and extract_reasoning(m.get("content", ""))]
+            for think_msg in thinking_messages[-2:]:
+                messages.append(think_msg)
+            
+            # Current user message
+            messages.append({"role": "user", "content": self.user_message})
+            
+            return messages
+        
+        # No trimming: use current messages as-is but ensure system prompt is first
+        # However, still truncate any overly long content
+        cleaned_messages = []
+        for msg in current_messages:
+            if msg.get("role") == "system":
+                cleaned_messages.append(msg)
+            elif msg.get("role") == "tool":
+                # Keep tool messages compact
+                cleaned_msg = msg.copy()
+                if isinstance(msg.get("content"), str) and len(msg["content"]) > 1800:
+                    cleaned_msg["content"] = msg["content"][:1800]
+                cleaned_messages.append(cleaned_msg)
+            else:
+                cleaned_messages.append(msg)
+        
+        return cleaned_messages
+    
+    def inject_urgency(self, iteration, stuck_type=None, max_iterations=30):
+        """Generate urgency message based on situation."""
+        if stuck_type == "repeated_planning":
+            return "ERROR: Stop planning. Execute tool calls NOW. No more thinking without action."
+        elif stuck_type == "theme_loop":
+            return "ERROR: You're repeating yourself. Take action immediately - use tools or provide final answer."
+        elif stuck_type == "no_progress":
+            return "ERROR: No progress detected. Use tools to gather information or synthesize findings."
+        elif stuck_type == "sufficient_research":
+            return "COMPLETE: You have enough information. Provide final answer with citations NOW."
+        elif iteration >= max_iterations * 0.67:  # 67% through iterations
+            return f"CRITICAL: Only {max_iterations-iteration} iterations left. Provide final answer with citations immediately."
+        elif iteration >= max_iterations * 0.5:  # 50% through iterations
+            return f"URGENT: {max_iterations-iteration} iterations remaining. Complete synthesis and answer."
+        else:
+            return None
 
 async def run_research(channel, prompt, model_name, user_id):
     cid = channel.id
@@ -643,6 +920,13 @@ async def run_research(channel, prompt, model_name, user_id):
     
     recent_context = conversation_history[cid][-4:] if conversation_history[cid] else []
     
+    # Initialize context manager
+    context_mgr = ContextManager(
+        system_prompt=system_prompt,
+        user_message=prompt,
+        conversation_history=recent_context
+    )
+    
     messages = [
         {"role": "system", "content": system_prompt}
     ] + recent_context + [
@@ -663,6 +947,7 @@ async def run_research(channel, prompt, model_name, user_id):
     pages_read = 0
     is_research_query = False
     is_llama = "llama" in model_name.lower()
+    is_gpt_oss = "gpt-oss" in model_name.lower()
 
     async def update_ui(final=False):
         seen = set()
@@ -682,31 +967,66 @@ async def run_research(channel, prompt, model_name, user_id):
         except:
             pass
 
-    for iteration in range(30):
-        if len(str(messages)) > 20000:
-            messages = [messages[0]] + messages[-12:]
+    # Model-specific iteration limits
+    max_iterations = 18 if is_llama else (25 if is_gpt_oss else 30)
+    
+    for iteration in range(max_iterations):
+        # Check for stuck loops BEFORE API call
+        stuck_type = context_mgr.detect_stuck_loop(iteration, is_llama=is_llama)
+        if stuck_type:
+            urgency_msg = context_mgr.inject_urgency(iteration, stuck_type, max_iterations)
+            if urgency_msg:
+                messages.append({"role": "user", "content": urgency_msg})
+                print(f"🚨 Loop detected: {stuck_type} at iteration {iteration}")
+        
+        # Progressive context optimization - start earlier for Llama
+        optimization_threshold = 4 if is_llama else 10
+        if iteration >= optimization_threshold:
+            messages = context_mgr.build_optimized_messages(messages, iteration, is_llama=is_llama)
+            print(f"📊 Context optimized at iteration {iteration}: {len(str(messages))} chars")
+        
+        # Check context size and force emergency mode if needed
+        context_size = len(str(messages))
+        if context_size > 25000:  # Approximate token limit check
+            print(f"⚠️ Large context detected ({context_size} chars), forcing emergency mode")
+            messages = context_mgr.build_optimized_messages(messages, 20, is_llama=is_llama)
         
         try:
-            response = groq_client.chat.completions.create(
-                model=model_name,
-                messages=messages,
-                tools=get_tools(include_memory=(supermemory and supermemory.enabled)),
-                tool_choice="auto",
-                temperature=0.2,
-                max_tokens=2000
-            )
+            # Build API parameters based on model type
+            api_params = {
+                "model": model_name,
+                "messages": messages,
+                "temperature": 0.2,
+                "max_tokens": 2000
+            }
+            
+            # GPT-OSS models support reasoning and built-in tools
+            if is_gpt_oss:
+                # Use Groq's built-in tools
+                api_params["tools"] = get_tools_for_model(model_name, include_memory=(supermemory and supermemory.enabled))
+                # Enable reasoning for GPT-OSS (reasoning_format is NOT supported by GPT-OSS)
+                # Only use include_reasoning parameter as per Groq documentation
+                api_params["include_reasoning"] = True
+                # Note: reasoning_format and include_reasoning are mutually exclusive
+                # Note: cacheable property is not supported by openai/gpt-oss-120b
+            else:
+                # Kimi K2 uses custom tools and traditional format
+                api_params["tools"] = get_tools_for_model(model_name, include_memory=(supermemory and supermemory.enabled))
+                api_params["tool_choice"] = "auto"
+            
+            response = groq_client.chat.completions.create(**api_params)
         except Exception as e:
             error_msg = str(e)
             
-            if "tool_use_failed" in error_msg and is_llama:
+            if "rate_limit" in error_msg.lower() or "413" in error_msg or "too large" in error_msg.lower():
+                print(f"⚠️ Context too large error at iteration {iteration}")
+                # Force emergency mode trimming with even more aggressive approach
+                messages = context_mgr.build_optimized_messages(messages, 25, is_llama=is_llama)
+                # Also inject urgency to force completion
                 messages.append({
                     "role": "user",
-                    "content": "ERROR: Separate <think> and tool calls. ONE per response."
+                    "content": "CRITICAL: Context limit reached. Provide final answer NOW with available information."
                 })
-                continue
-            elif "rate_limit" in error_msg.lower() or "413" in error_msg or "too large" in error_msg.lower():
-                await channel.send(f"⚠️ Context too large. Trimming...")
-                messages = [messages[0]] + messages[-8:]
                 continue
             else:
                 await channel.send(f"⚠️ API Error: {e}")
@@ -715,74 +1035,82 @@ async def run_research(channel, prompt, model_name, user_id):
         msg = response.choices[0].message
         content = msg.content or ""
         
+        # Handle reasoning content from GPT-OSS models
+        # Per Groq docs, reasoning is in the 'reasoning' field when include_reasoning=True
+        reasoning_content = None
+        if is_gpt_oss and hasattr(msg, 'reasoning') and msg.reasoning:
+            reasoning_content = msg.reasoning
+            # Display reasoning in UI - show more for GPT-OSS (up to 800 chars instead of 500)
+            # This helps users understand the AI's thought process better
+            max_reasoning_display = 800
+            reasoning_section = f"🧠 **Reasoning**\n\n> {reasoning_content[:max_reasoning_display]}"
+            if len(reasoning_content) > max_reasoning_display:
+                reasoning_section += "..."
+            display_sections.append(reasoning_section)
+            await update_ui()
+        
         hallucinated = re.search(r'<function[^>]*>|(?:search_wikipedia|get_wikipedia_page|search_memory)\s*\(|\{\s*"query":', content, re.IGNORECASE)
         
-        think = extract_reasoning(content)
-        if think:
-            is_research_query = True
-            header, body = parse_thinking_with_header(think)
-            
-            if header:
-                if "Planning" in header or "planning" in header.lower():
-                    has_planning = True
-                elif "Synthesiz" in header or "synthesiz" in header.lower():
-                    has_synthesis = True
-            
-            if body and len(body) > 500:
-                body = body[:500] + "..."
-            
-            if header and body:
-                thinking_section = f"🧠 **Thought**\n\n> **{header}**\n\n{body}"
-            elif body:
-                thinking_section = f"🧠 **Thought**\n\n> {think[:500]}"
-            else:
-                thinking_section = f"🧠 **Thought**\n\n> {think[:500]}"
-            
-            display_sections.append(thinking_section)
-            await update_ui()
-
         tool_calls = msg.tool_calls
+        
+        # Track in context manager for loop detection
+        context_mgr.add_thinking(content, has_tool_calls=bool(tool_calls))
+        
+        # Handle thinking tags for Kimi K2 (not GPT-OSS which uses reasoning_content)
+        if not is_gpt_oss:
+            think = extract_reasoning(content)
+            if think:
+                is_research_query = True
+                header, body = parse_thinking_with_header(think)
+                
+                if header:
+                    if "Planning" in header or "planning" in header.lower():
+                        has_planning = True
+                    elif "Synthesiz" in header or "synthesiz" in header.lower():
+                        has_synthesis = True
+                
+                # Truncate body for display and storage
+                max_body_length = 500
+                if body and len(body) > max_body_length:
+                    body = body[:max_body_length] + "..."
+                
+                if header and body:
+                    thinking_section = f"🧠 **Thought**\n\n> **{header}**\n\n{body}"
+                elif body:
+                    thinking_section = f"🧠 **Thought**\n\n> {think[:max_body_length]}"
+                else:
+                    thinking_section = f"🧠 **Thought**\n\n> {think[:max_body_length]}"
+                
+                display_sections.append(thinking_section)
+                await update_ui()
         
         if tool_calls:
             is_research_query = True
         
-        if hallucinated and not tool_calls:
+        # Only check for hallucinated tools in Kimi K2 (not GPT-OSS which handles reasoning differently)
+        if not is_gpt_oss and hallucinated and not tool_calls:
             messages.append({"role": "assistant", "content": content})
             messages.append({"role": "user", "content": "ERROR: Use native API only."})
             continue
         
-        if is_llama and think and tool_calls:
-            messages.append({"role": "assistant", "content": content})
-            messages.append({
-                "role": "user",
-                "content": "ERROR: NEVER combine <think> and tool calls."
-            })
-            continue
-        
-        if not has_planning and tool_calls and iteration == 0:
-            messages.append({
-                "role": "assistant",
-                "content": content,
-                "tool_calls": [
-                    {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
-                    for tc in tool_calls
-                ]
-            })
-            messages.append({
-                "role": "user",
-                "content": "ERROR: Start with <think>**Planning**</think> FIRST."
-            })
-            continue
-        
         if tool_calls:
-            messages.append({
+            # Build assistant message with tool calls
+            assistant_msg = {
                 "role": "assistant",
-                "content": content,
-                "tool_calls": [
-                    {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
-                    for tc in tool_calls
-                ]
-            })
+                "content": content
+            }
+            
+            # Add reasoning content if present (for GPT-OSS)
+            if reasoning_content:
+                assistant_msg["reasoning_content"] = reasoning_content
+            
+            # Add tool calls
+            assistant_msg["tool_calls"] = [
+                {"id": tc.id, "type": tc.type, "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                for tc in tool_calls
+            ]
+            
+            messages.append(assistant_msg)
             
             for tool_call in tool_calls:
                 tool_call_count += 1
@@ -799,6 +1127,118 @@ async def run_research(channel, prompt, model_name, user_id):
                     await update_ui()
                     continue
                 
+                # Check if this is a built-in tool (browser_search, code_interpreter, browser.search, browser.open)
+                # Note: tool_call.type can be "browser_search", "browser.search", "browser.open", "code_interpreter", or "function"
+                # For browser tools, we check both the type and the function name
+                tool_function_name = tool_call.function.name if hasattr(tool_call, 'function') and tool_call.function else None
+                is_builtin_browser_tool = (
+                    tool_call.type in ["browser_search", "code_interpreter", "browser.search", "browser.open"] or
+                    (tool_call.type == "function" and tool_function_name in ["browser.search", "browser.open"])
+                )
+                is_builtin_tool = is_builtin_browser_tool
+                
+                if is_builtin_tool:
+                    # Built-in tools are handled automatically by Groq
+                    # We need to display them in the UI and extract URLs for browser_search
+                    # Get the actual tool type (might be in type or function.name)
+                    tool_type = tool_call.type if tool_call.type != "function" else tool_function_name
+                    
+                    if tool_type in ["browser_search", "browser.search"]:
+                        # Extract query and results from tool call
+                        query_display = "Searching the web..."
+                        search_urls = []
+                        
+                        try:
+                            if hasattr(tool_call, 'function') and tool_call.function.arguments:
+                                fn_args = json.loads(tool_call.function.arguments)
+                                query_display = f"Searching: {fn_args.get('query', 'the web')}"
+                        except:
+                            pass
+                        
+                        # Try to extract URLs from the output if available
+                        try:
+                            if hasattr(tool_call, 'output') and tool_call.output:
+                                output_str = tool_call.output if isinstance(tool_call.output, str) else str(tool_call.output)
+                                
+                                # Parse the line-by-line output format from Groq browser_search
+                                # Format: L4: \* 【0†Title†domain.com】
+                                # Use a more precise pattern to avoid multi-line matches
+                                url_pattern = r'【\d+†([^†\n]+?)†([^\]】\n]+?)】'
+                                matches = re.findall(url_pattern, output_str)
+                                
+                                for title, domain in matches[:5]:  # Show top 5 results
+                                    # Reconstruct full URL from domain
+                                    if not domain.startswith('http'):
+                                        url = f"https://{domain}"
+                                    else:
+                                        url = domain
+                                    search_urls.append(f"- [{title}]({url})")
+                                
+                                # Fallback: try JSON format if the above didn't work
+                                if not search_urls:
+                                    try:
+                                        output_data = json.loads(output_str)
+                                        if isinstance(output_data, dict) and 'search_results' in output_data:
+                                            results = output_data['search_results'].get('results', [])
+                                            for result in results[:5]:
+                                                if isinstance(result, dict) and 'url' in result:
+                                                    title = result.get('title', 'Link')
+                                                    url = result['url']
+                                                    search_urls.append(f"- [{title}]({url})")
+                                    except:
+                                        pass
+                        except Exception as e:
+                            print(f"⚠️ Error extracting search URLs: {e}")
+                        
+                        # Build display with URLs if available
+                        search_display = f"🔍 **Web Search**\n\n> {query_display}"
+                        if search_urls:
+                            search_display += "\n\n" + "\n".join(search_urls)
+                        
+                        display_sections.append(search_display)
+                        await update_ui()
+                    
+                    elif tool_type == "browser.open":
+                        # Display which webpage is being visited
+                        page_url = "unknown page"
+                        
+                        try:
+                            if hasattr(tool_call, 'output') and tool_call.output:
+                                output_str = tool_call.output if isinstance(tool_call.output, str) else str(tool_call.output)
+                                
+                                # Extract URL from output (format: L1: URL: https://...)
+                                url_match = re.search(r'URL:\s*\n?\s*(https?://[^\s\n]+)', output_str)
+                                if url_match:
+                                    page_url = url_match.group(1)
+                                    # Extract page title if available (skip the URL line)
+                                    lines = output_str.split('\n')
+                                    page_title = None
+                                    for line in lines[2:]:  # Start from line after URL
+                                        line = line.strip()
+                                        if line and not line.startswith('L') and not line.startswith('URL:'):
+                                            # Remove line numbers if present (e.g., "L2: Title" -> "Title")
+                                            line = re.sub(r'^L\d+:\s*', '', line)
+                                            page_title = line
+                                            break
+                                    
+                                    if page_title and page_title != page_url:
+                                        page_url = f"[{page_title}]({page_url})"
+                                    else:
+                                        page_url = f"[{page_url}]({page_url})"
+                        except Exception as e:
+                            print(f"⚠️ Error extracting page URL: {e}")
+                        
+                        display_sections.append(f"📖 **Reading Webpage**\n\n> {page_url}")
+                        await update_ui()
+                        
+                    elif tool_type == "code_interpreter":
+                        display_sections.append(f"💻 **Code Execution**\n\n> Running Python code...")
+                        await update_ui()
+                    
+                    # Built-in tools don't need explicit handling - continue to next tool
+                    continue
+                
+                # Handle custom function tools
                 fn_name = tool_call.function.name
                 
                 try:
@@ -884,33 +1324,34 @@ async def run_research(channel, prompt, model_name, user_id):
                     else:
                         pages_read += 1
                         sources[title] = wiki_url
+                        context_mgr.research_context['pages_read'] = pages_read
                 else:
                     result = "ERROR: Unknown function"
                 
-                messages.append({
+                # Truncate tool results more aggressively for Llama
+                max_tool_result = 800 if is_llama else 1800
+                tool_result_msg = {
                     "role": "tool",
                     "tool_call_id": tool_call.id,
                     "name": fn_name,
-                    "content": str(result)[:1800]
-                })
+                    "content": str(result)[:max_tool_result]
+                }
+                messages.append(tool_result_msg)
+                
+                # Track in context manager
+                context_mgr.add_tool_result(tool_result_msg)
         
         else:
             final_answer = clean_output(content)
             
-            if is_research_query:
-                if pages_read < 3 and not has_synthesis:
+            # For Kimi K2, check minimum pages (GPT-OSS uses browser_search instead)
+            if is_research_query and not is_gpt_oss:
+                min_pages = 3
+                if pages_read < min_pages:
                     messages.append({"role": "assistant", "content": content})
                     messages.append({
                         "role": "user",
-                        "content": f"Read {3 - pages_read} more page(s)."
-                    })
-                    continue
-                
-                if not has_synthesis and final_answer.strip() and pages_read >= 3:
-                    messages.append({"role": "assistant", "content": content})
-                    messages.append({
-                        "role": "user",
-                        "content": "Use <think> to synthesize findings briefly."
+                        "content": f"Read {min_pages - pages_read} more page(s) for comprehensive answer."
                     })
                     continue
             
