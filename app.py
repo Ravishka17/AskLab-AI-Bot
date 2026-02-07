@@ -438,7 +438,9 @@ def convert_to_past_tense(sections):
     converted = []
     for section in sections:
         section = section.replace("**Searching Wikipedia...**", "**Searched Wikipedia**")
+        section = section.replace("**Searching...**", "**Searched**")
         section = section.replace("**Reading Article...**", "**Read Article**")
+        section = section.replace("**Reading...**", "**Read Article**")
         section = section.replace("**Searching Memory...**", "**Searched Memory**")
         section = section.replace("**Thinking...**", "**Thought**")
         section = section.replace("**Skipping Duplicate**", "**Skipped Duplicate**")
@@ -1144,18 +1146,25 @@ async def run_research(channel, prompt, model_name, user_id):
                     tool_type = tool_call.type if tool_call.type != "function" else tool_function_name
                     
                     if tool_type in ["browser_search", "browser.search"]:
-                        # Extract query and results from tool call
-                        query_display = "Searching the web..."
-                        search_urls = []
+                        # IMMEDIATELY show "Searching..." indicator
+                        query_display = "Searching..."
                         
+                        # Extract query from arguments to show what's being searched
                         try:
                             if hasattr(tool_call, 'function') and tool_call.function.arguments:
                                 fn_args = json.loads(tool_call.function.arguments)
-                                query_display = f"Searching: {fn_args.get('query', 'the web')}"
+                                query = fn_args.get('query', '')
+                                if query:
+                                    query_display = f"Searching: {query}"
                         except:
                             pass
                         
-                        # Try to extract URLs from the output if available
+                        # Show searching indicator immediately
+                        display_sections.append(f"🔍 **Searching...**\n\n> {query_display}")
+                        await update_ui()
+                        
+                        # Now try to extract URLs from the output if available
+                        search_urls = []
                         try:
                             if hasattr(tool_call, 'output') and tool_call.output:
                                 output_str = tool_call.output if isinstance(tool_call.output, str) else str(tool_call.output)
@@ -1187,19 +1196,21 @@ async def run_research(channel, prompt, model_name, user_id):
                                                     search_urls.append(f"- [{title}]({url})")
                                     except:
                                         pass
+                                
+                                # Update display with search results if we found URLs
+                                if search_urls:
+                                    # Replace the "Searching..." with "Searched" and add results
+                                    display_sections[-1] = f"🔍 **Searched**\n\n> {query_display}\n\n" + "\n".join(search_urls)
+                                    await update_ui()
                         except Exception as e:
                             print(f"⚠️ Error extracting search URLs: {e}")
-                        
-                        # Build display with URLs if available
-                        search_display = f"🔍 **Web Search**\n\n> {query_display}"
-                        if search_urls:
-                            search_display += "\n\n" + "\n".join(search_urls)
-                        
-                        display_sections.append(search_display)
-                        await update_ui()
                     
                     elif tool_type == "browser.open":
-                        # Display which webpage is being visited
+                        # IMMEDIATELY show "Reading..." indicator
+                        display_sections.append(f"📖 **Reading...**\n\n> Opening webpage...")
+                        await update_ui()
+                        
+                        # Now try to extract URL and title from output
                         page_url = "unknown page"
                         
                         try:
@@ -1225,11 +1236,12 @@ async def run_research(channel, prompt, model_name, user_id):
                                         page_url = f"[{page_title}]({page_url})"
                                     else:
                                         page_url = f"[{page_url}]({page_url})"
+                                    
+                                    # Update the display with actual page info
+                                    display_sections[-1] = f"📖 **Read Article**\n\n> {page_url}"
+                                    await update_ui()
                         except Exception as e:
                             print(f"⚠️ Error extracting page URL: {e}")
-                        
-                        display_sections.append(f"📖 **Reading Webpage**\n\n> {page_url}")
-                        await update_ui()
                         
                     elif tool_type == "code_interpreter":
                         display_sections.append(f"💻 **Code Execution**\n\n> Running Python code...")
