@@ -1040,9 +1040,11 @@ async def run_research(channel, prompt, model_name, user_id):
         reasoning_content = None
         if is_gpt_oss and hasattr(msg, 'reasoning') and msg.reasoning:
             reasoning_content = msg.reasoning
-            # Display reasoning in UI
-            reasoning_section = f"🧠 **Reasoning**\n\n> {reasoning_content[:500]}"
-            if len(reasoning_content) > 500:
+            # Display reasoning in UI - show more for GPT-OSS (up to 800 chars instead of 500)
+            # This helps users understand the AI's thought process better
+            max_reasoning_display = 800
+            reasoning_section = f"🧠 **Reasoning**\n\n> {reasoning_content[:max_reasoning_display]}"
+            if len(reasoning_content) > max_reasoning_display:
                 reasoning_section += "..."
             display_sections.append(reasoning_section)
             await update_ui()
@@ -1125,17 +1127,27 @@ async def run_research(channel, prompt, model_name, user_id):
                     await update_ui()
                     continue
                 
-                # Check if this is a built-in tool (browser_search, code_interpreter)
-                is_builtin_tool = tool_call.type in ["browser_search", "code_interpreter"]
+                # Check if this is a built-in tool (browser_search, code_interpreter, browser.search, browser.open)
+                # Note: tool_call.type can be "browser_search", "browser.search", "browser.open", "code_interpreter", or "function"
+                # For browser tools, we check both the type and the function name
+                tool_function_name = tool_call.function.name if hasattr(tool_call, 'function') and tool_call.function else None
+                is_builtin_browser_tool = (
+                    tool_call.type in ["browser_search", "code_interpreter", "browser.search", "browser.open"] or
+                    (tool_call.type == "function" and tool_function_name in ["browser.search", "browser.open"])
+                )
+                is_builtin_tool = is_builtin_browser_tool
                 
                 if is_builtin_tool:
                     # Built-in tools are handled automatically by Groq
-                    # We just need to display them in the UI
-                    tool_type = tool_call.type
+                    # We need to display them in the UI and extract URLs for browser_search
+                    # Get the actual tool type (might be in type or function.name)
+                    tool_type = tool_call.type if tool_call.type != "function" else tool_function_name
                     
-                    if tool_type == "browser_search":
-                        # Extract query from tool call if available
+                    if tool_type in ["browser_search", "browser.search"]:
+                        # Extract query and results from tool call
                         query_display = "Searching the web..."
+                        search_urls = []
+                        
                         try:
                             if hasattr(tool_call, 'function') and tool_call.function.arguments:
                                 fn_args = json.loads(tool_call.function.arguments)
@@ -1143,8 +1155,82 @@ async def run_research(channel, prompt, model_name, user_id):
                         except:
                             pass
                         
-                        display_sections.append(f"🔍 **Web Search**\n\n> {query_display}")
+                        # Try to extract URLs from the output if available
+                        try:
+                            if hasattr(tool_call, 'output') and tool_call.output:
+                                output_str = tool_call.output if isinstance(tool_call.output, str) else str(tool_call.output)
+                                
+                                # Parse the line-by-line output format from Groq browser_search
+                                # Format: L4: \* 【0†Title†domain.com】
+                                # Use a more precise pattern to avoid multi-line matches
+                                url_pattern = r'【\d+†([^†\n]+?)†([^\]】\n]+?)】'
+                                matches = re.findall(url_pattern, output_str)
+                                
+                                for title, domain in matches[:5]:  # Show top 5 results
+                                    # Reconstruct full URL from domain
+                                    if not domain.startswith('http'):
+                                        url = f"https://{domain}"
+                                    else:
+                                        url = domain
+                                    search_urls.append(f"- [{title}]({url})")
+                                
+                                # Fallback: try JSON format if the above didn't work
+                                if not search_urls:
+                                    try:
+                                        output_data = json.loads(output_str)
+                                        if isinstance(output_data, dict) and 'search_results' in output_data:
+                                            results = output_data['search_results'].get('results', [])
+                                            for result in results[:5]:
+                                                if isinstance(result, dict) and 'url' in result:
+                                                    title = result.get('title', 'Link')
+                                                    url = result['url']
+                                                    search_urls.append(f"- [{title}]({url})")
+                                    except:
+                                        pass
+                        except Exception as e:
+                            print(f"⚠️ Error extracting search URLs: {e}")
+                        
+                        # Build display with URLs if available
+                        search_display = f"🔍 **Web Search**\n\n> {query_display}"
+                        if search_urls:
+                            search_display += "\n\n" + "\n".join(search_urls)
+                        
+                        display_sections.append(search_display)
                         await update_ui()
+                    
+                    elif tool_type == "browser.open":
+                        # Display which webpage is being visited
+                        page_url = "unknown page"
+                        
+                        try:
+                            if hasattr(tool_call, 'output') and tool_call.output:
+                                output_str = tool_call.output if isinstance(tool_call.output, str) else str(tool_call.output)
+                                
+                                # Extract URL from output (format: L1: URL: https://...)
+                                url_match = re.search(r'URL:\s*\n?\s*(https?://[^\s\n]+)', output_str)
+                                if url_match:
+                                    page_url = url_match.group(1)
+                                    # Extract page title if available (skip the URL line)
+                                    lines = output_str.split('\n')
+                                    page_title = None
+                                    for line in lines[2:]:  # Start from line after URL
+                                        line = line.strip()
+                                        if line and not line.startswith('L') and not line.startswith('URL:'):
+                                            # Remove line numbers if present (e.g., "L2: Title" -> "Title")
+                                            line = re.sub(r'^L\d+:\s*', '', line)
+                                            page_title = line
+                                            break
+                                    
+                                    if page_title and page_title != page_url:
+                                        page_url = f"[{page_title}]({page_url})"
+                                    else:
+                                        page_url = f"[{page_url}]({page_url})"
+                        except Exception as e:
+                            print(f"⚠️ Error extracting page URL: {e}")
+                        
+                        display_sections.append(f"📖 **Reading Webpage**\n\n> {page_url}")
+                        await update_ui()
+                        
                     elif tool_type == "code_interpreter":
                         display_sections.append(f"💻 **Code Execution**\n\n> Running Python code...")
                         await update_ui()
